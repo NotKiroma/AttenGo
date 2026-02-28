@@ -1,0 +1,9 @@
+[
+  {"lastName": "Бальков", "firstName": "Максим", "status": null, "isMale": true},
+  {"lastName": "Двойных", "firstName": "Элина", "status": null, "isMale": false},
+  {"lastName": "Бейшенов", "firstName": "Арманжан", "status": null, "isMale": true},
+  {"lastName": "Краснова", "firstName": "Дарья", "status": null, "isMale": false},
+  {"lastName": "Сухоногин", "firstName": "Святослав", "status": null, "isMale": true},
+  {"lastName": "Джунусова", "firstName": "Алуа", "status": null, "isMale": false},
+  {"lastName": "Бровкин", "firstName": "Егор", "status": null, "isMale": true}
+]

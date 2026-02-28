@@ -268,22 +268,24 @@ class HomeScreen extends StatelessWidget {
                       ),
                       child: Center(
                         child: Text(
-                          "85%",
+                          "88%",
                           style: TextStyle(color: Colors.white, fontSize: w * 0.07, fontWeight: FontWeight.bold),
                         ),
                       ),
                     ),
                     SizedBox(width: w * 0.05),
-                    Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        _buildStatRow(w, Color(0xFF0D59F2), "Посещаемость", "24"),
-                        SizedBox(height: h * 0.015),
-                        _buildStatRow(w, Color(0xFFF87171), "Отсутствуют", "2"),
-                        SizedBox(height: h * 0.015),
-                        _buildStatRow(w, Color(0xFFFACC15), "Опоздали", "1"),
-                      ],
-                    ),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          _buildStatRow(w, Color(0xFF0D59F2), "Посещаемость", "24"),
+                          SizedBox(height: h * 0.015),
+                          _buildStatRow(w, Color(0xFFF87171), "Отсутствуют", "2"),
+                          SizedBox(height: h * 0.015),
+                          _buildStatRow(w, Color(0xFFFACC15), "Опоздали", "1"),
+                        ],
+                      ),
+                    ), // ← и закрой
                   ],
                 ),
                 SizedBox(height: h * 0.025),
@@ -309,11 +311,12 @@ class HomeScreen extends StatelessWidget {
           decoration: BoxDecoration(color: dotColor, shape: BoxShape.circle),
         ),
         SizedBox(width: w * 0.02),
-        Text(
-          label,
-          style: TextStyle(color: Colors.white, fontSize: w * 0.042),
+        Expanded(
+          child: Text(
+            label,
+            style: TextStyle(color: Colors.white, fontSize: w * 0.042),
+          ),
         ),
-        SizedBox(width: w * 0.015),
         Text(
           value,
           style: TextStyle(color: Colors.white, fontSize: w * 0.042, fontWeight: FontWeight.bold),
