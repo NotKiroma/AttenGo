@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../services/schedule_service.dart';
 
 class SheduleScreen extends StatefulWidget {
   const SheduleScreen({super.key});
@@ -8,58 +9,63 @@ class SheduleScreen extends StatefulWidget {
 }
 
 class _SheduleScreenState extends State<SheduleScreen> {
-  int _activeIndex = 0; // ВТ активен по умолчанию
+  int _activeIndex = 0;
+  bool _isLoading  = true;
 
-  // Дни недели и даты для отображения в карточках
-  final List<Map<String, String>> _days = [
-    {'week': 'ПН', 'day': '24'},
-    {'week': 'ВТ', 'day': '25'},
-    {'week': 'СР', 'day': '26'},
-    {'week': 'ЧТ', 'day': '27'},
-    {'week': 'ПТ', 'day': '28'},
-  ];
+  List<DateTime> _dates    = [];
+  List<List<Lesson>> _schedule = [];
 
-  // Расписание по дням (индекс 0 = ПН, 1 = ВТ, и т.д.)
-  final List<List<Map<String, String>>> _schedule = [
-    // ПН
-    [
-      {'timeStart': '08:00', 'timeEnd': '09:20', 'subject': 'Программирование цифровых устройств', 'room': 'Ауд. 313, Этаж 3', 'teacher': 'Зиаятдинов В.Р.'},
-      {'timeStart': '09:30', 'timeEnd': '10:50', 'subject': 'Основы предпринимательской деятельности', 'room': 'Ауд. 105, Этаж 1', 'teacher': 'Шамова Ш.Н.'},
-      {'timeStart': '11:00', 'timeEnd': '12:20', 'subject': 'Нейронные сети и искусственный интеллект', 'room': 'Ауд. 406, Этаж 4', 'teacher': 'Абайұлы Т.'},
-    ],
-    // ВТ
-    [
-      {'timeStart': '08:00', 'timeEnd': '09:20', 'subject': 'Физическая культура', 'room': 'Спортивный зал', 'teacher': 'Зеленин В.А.'},
-      {'timeStart': '09:30', 'timeEnd': '10:50', 'subject': 'Объектно-ориентированное программирование', 'room': 'Ауд. 310, Этаж 3', 'teacher': 'Нехорошев В.Д.'},
-      {'timeStart': '11:00', 'timeEnd': '12:20', 'subject': 'Разработка прикладных решений', 'room': 'Ауд. 211, Этаж 2', 'teacher': 'Мырзабекова Д.Е.'},
-      {'timeStart': '12:50', 'timeEnd': '14:10', 'subject': 'Основы социологии и политологии', 'room': 'Ауд. 106, Этаж 1', 'teacher': 'Нуржумаев М.Т.'},
-    ],
-    // СР
-    [
-      {'timeStart': '08:00', 'timeEnd': '09:20', 'subject': 'Программирование цифровых устройств', 'room': 'Ауд. 313, Этаж 3', 'teacher': 'Зиаятдинов В.Р.'},
-      {'timeStart': '09:30', 'timeEnd': '10:50', 'subject': 'Объектно-ориентированное программирование', 'room': 'Ауд. 310, Этаж 3', 'teacher': 'Нехорошев В.Д.'},
-      {'timeStart': '11:00', 'timeEnd': '12:20', 'subject': 'Разработка прикладных решений', 'room': 'Ауд. 211, Этаж 2', 'teacher': 'Мырзабекова Д.Е.'},
-      {'timeStart': '12:50', 'timeEnd': '14:10', 'subject': 'Основы предпринимательской деятельности', 'room': 'Ауд. 105, Этаж 1', 'teacher': 'Шамова Ш.Н.'},
-      {'timeStart': '14:20', 'timeEnd': '15:40', 'subject': 'Культурология', 'room': 'Ауд. 106, Этаж 1', 'teacher': 'Нуржумаев М.Т.'},
-    ],
-    // ЧТ
-    [
-      {'timeStart': '08:00', 'timeEnd': '09:20', 'subject': 'Физическая культура', 'room': 'Спортивный зал', 'teacher': 'Зеленин В.А.'},
-      {'timeStart': '09:30', 'timeEnd': '10:50', 'subject': 'Объектно-ориентированное программирование', 'room': 'Ауд. 310, Этаж 3', 'teacher': 'Нехорошев В.Д.'},
-      {'timeStart': '11:00', 'timeEnd': '12:20', 'subject': 'Нейронные сети и искусственный интеллект', 'room': 'Ауд. 406, Этаж 4', 'teacher': 'Абайұлы Т.'},
-    ],
-    // ПТ
-    [
-      {'timeStart': '09:30', 'timeEnd': '10:50', 'subject': 'Разработка прикладных решений', 'room': 'Ауд. 211, Этаж 2', 'teacher': 'Мырзабекова Д.Е.'},
-      {'timeStart': '11:00', 'timeEnd': '12:20', 'subject': 'Нейронные сети и искусственный интеллект', 'room': 'Ауд. 406, Этаж 4', 'teacher': 'Абайұлы Т.'},
-      {'timeStart': '12:50', 'timeEnd': '14:10', 'subject': 'Основы социологии и политологии', 'room': 'Ауд. 106, Этаж 1', 'teacher': 'Нуржумаев М.Т.'},
-    ],
-  ];
+  static const _weekNames = ['ПН', 'ВТ', 'СР', 'ЧТ', 'ПТ'];
+
+  @override
+  void initState() {
+    super.initState();
+    _activeIndex = _todayIndex;
+    _loadSchedule();
+  }
+
+  int get _todayIndex {
+    final wd = DateTime.now().weekday;
+    return (wd >= 1 && wd <= 5) ? wd - 1 : 0;
+  }
+
+  DateTime get _monday {
+    final now   = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    switch (now.weekday) {
+      case 6:  return today.add(const Duration(days: 2));
+      case 7:  return today.add(const Duration(days: 1));
+      default: return today.subtract(Duration(days: now.weekday - 1));
+    }
+  }
+
+  Future<void> _loadSchedule() async {
+    final allDays = await ScheduleService.getAllDays();
+    final monday  = _monday;
+    final dates   = List.generate(5, (i) => monday.add(Duration(days: i)));
+
+    setState(() {
+      _dates    = dates;
+      _schedule = allDays;
+      _isLoading = false;
+    });
+  }
+
+  static const _monthsShort = ['', 'янв', 'фев', 'мар', 'апр', 'май', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
+
+  String _formatDate(DateTime d) => '${d.day.toString().padLeft(2, '0')} ${_monthsShort[d.month]}';
 
   @override
   Widget build(BuildContext context) {
     final double w = MediaQuery.of(context).size.width;
     final double h = MediaQuery.of(context).size.height;
+
+    if (_isLoading) {
+      return const Scaffold(
+        backgroundColor: Color(0xFF101C22),
+        body: Center(child: CircularProgressIndicator(color: Color(0xFF0D59F2))),
+      );
+    }
 
     return Scaffold(
       backgroundColor: const Color(0xFF101C22),
@@ -68,7 +74,7 @@ class _SheduleScreenState extends State<SheduleScreen> {
         scrolledUnderElevation: 0,
         title: Text(
           'Расписание',
-          style: TextStyle(color: const Color(0xFFFFFFFF), fontSize: w * 0.06, fontWeight: FontWeight.bold),
+          style: TextStyle(color: Colors.white, fontSize: w * 0.06, fontWeight: FontWeight.bold),
         ),
         centerTitle: true,
         backgroundColor: const Color(0xFF101C22),
@@ -82,15 +88,10 @@ class _SheduleScreenState extends State<SheduleScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            _weekCardes(w, h),
+            _weekRow(w, h),
             Text(
-              'ЗАНЯТИЯ СЕГОДНЯ',
-              style: TextStyle(
-                color: const Color(0xFF7D92B1), //
-                fontSize: w * 0.033,
-                fontWeight: FontWeight.w600,
-                letterSpacing: 1.2,
-              ),
+              'ЗАНЯТИЯ',
+              style: TextStyle(color: const Color(0xFF7D92B1), fontSize: w * 0.033, fontWeight: FontWeight.w600, letterSpacing: 1.2),
             ),
             SizedBox(height: h * 0.015),
             _lessonsList(w, h),
@@ -100,33 +101,33 @@ class _SheduleScreenState extends State<SheduleScreen> {
     );
   }
 
-  // Список занятий для выбранного дня
   Widget _lessonsList(double w, double h) {
+    if (_schedule.isEmpty || _activeIndex >= _schedule.length) {
+      return const Expanded(child: SizedBox.shrink());
+    }
     final lessons = _schedule[_activeIndex];
+    if (lessons.isEmpty) {
+      return Expanded(
+        child: Center(
+          child: Text('Занятий нет', style: TextStyle(color: const Color(0xFF7D92B1), fontSize: w * 0.045)),
+        ),
+      );
+    }
     return Expanded(
       child: SingleChildScrollView(
-        child: Column(children: lessons.map((lesson) => _buildLessonCard(w, h, lesson)).toList()), //
+        child: Column(children: lessons.map((l) => _buildLessonCard(w, h, l)).toList()),
       ),
     );
   }
 
-  // Конструктор карточек занятий
-  Widget _buildLessonCard(double w, double h, Map<String, String> lesson) {
-    const Color accentColor = Color(0xFF455664);
-    const Color cardColor = Color(0xFF10232C);
-    const Color borderColor = Color(0xFF455664);
-    const Color subjectColor = Colors.white;
-    const Color timeStartColor = Colors.white;
-    const Color timeEndColor = Color(0xFF7D92B1);
-    const Color secondaryColor = Color(0xFF7D92B1);
-
+  Widget _buildLessonCard(double w, double h, Lesson lesson) {
     return Container(
       margin: EdgeInsets.only(bottom: h * 0.015),
       padding: EdgeInsets.all(w * 0.04),
       decoration: BoxDecoration(
-        color: cardColor,
+        color: const Color(0xFF10232C),
         borderRadius: BorderRadius.circular(27),
-        border: Border.all(color: borderColor, width: 1),
+        border: Border.all(color: const Color(0xFF455664), width: 1),
       ),
       child: IntrinsicHeight(
         child: Row(
@@ -135,49 +136,41 @@ class _SheduleScreenState extends State<SheduleScreen> {
             Column(
               crossAxisAlignment: CrossAxisAlignment.center,
               children: [
-                Text(
-                  lesson['timeStart']!,
-                  style: TextStyle(color: timeStartColor, fontSize: w * 0.04, fontWeight: FontWeight.bold),
-                ),
+                Text(lesson.timeStart, style: TextStyle(color: Colors.white, fontSize: w * 0.04, fontWeight: FontWeight.bold)),
                 Expanded(
-                  child: Container(margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 2), width: 1.5, height: 28, color: accentColor.withOpacity(0.5)),
+                  child: Container(
+                    margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 2),
+                    width: 1.5,
+                    color: const Color(0xFF455664).withOpacity(0.5),
+                  ),
                 ),
-                Text(
-                  lesson['timeEnd']!,
-                  style: TextStyle(color: timeEndColor, fontSize: w * 0.034),
-                ),
+                Text(lesson.timeEnd, style: TextStyle(color: const Color(0xFF7D92B1), fontSize: w * 0.034)),
               ],
             ),
             SizedBox(width: w * 0.04),
-            // Правая часть
+            // Информация
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    lesson['subject']!,
-                    style: TextStyle(color: subjectColor, fontSize: w * 0.042, fontWeight: FontWeight.bold, height: 1.3),
+                    lesson.subject,
+                    style: TextStyle(color: Colors.white, fontSize: w * 0.042, fontWeight: FontWeight.bold, height: 1.3),
                   ),
                   SizedBox(height: h * 0.008),
                   Row(
                     children: [
-                      Icon(Icons.location_on_outlined, color: secondaryColor, size: w * 0.038),
+                      Icon(Icons.location_on_outlined, color: const Color(0xFF7D92B1), size: w * 0.038),
                       SizedBox(width: w * 0.01),
-                      Text(
-                        lesson['room']!,
-                        style: TextStyle(color: secondaryColor, fontSize: w * 0.033),
-                      ),
+                      Text(lesson.room, style: TextStyle(color: const Color(0xFF7D92B1), fontSize: w * 0.033)),
                     ],
                   ),
                   SizedBox(height: h * 0.005),
                   Row(
                     children: [
-                      Icon(Icons.person_outline, color: secondaryColor, size: w * 0.038),
+                      Icon(Icons.person_outline, color: const Color(0xFF7D92B1), size: w * 0.038),
                       SizedBox(width: w * 0.01),
-                      Text(
-                        lesson['teacher']!,
-                        style: TextStyle(color: secondaryColor, fontSize: w * 0.033),
-                      ),
+                      Text(lesson.teacher, style: TextStyle(color: const Color(0xFF7D92B1), fontSize: w * 0.033)),
                     ],
                   ),
                 ],
@@ -189,53 +182,62 @@ class _SheduleScreenState extends State<SheduleScreen> {
     );
   }
 
-  // Карточки дней недели
-  Widget _weekCardes(double w, double h) {
+  Widget _weekRow(double w, double h) {
     return Container(
-      margin: EdgeInsets.only(bottom: h * 0.03),
-      width: double.infinity,
+      margin: EdgeInsets.only(bottom: h * 0.025),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: List.generate(_days.length, (index) {
+        children: List.generate(5, (i) {
           return GestureDetector(
-            onTap: () {
-              setState(() {
-                _activeIndex = index;
-              });
-            },
-            child: _buildWeekCard(w, h, isActive: _activeIndex == index, week: _days[index]['week']!, day: _days[index]['day']!),
+            onTap: () => setState(() => _activeIndex = i),
+            child: _buildDayCard(w, h, index: i),
           );
         }),
       ),
     );
   }
 
-  // Конструктор карточки дня недели
-  Widget _buildWeekCard(double w, double h, {required bool isActive, required String week, required String day}) {
-    final color = isActive ? const Color(0xFFFFFFFF) : const Color(0xFF7D92B1);
-    final bgColor = isActive ? const Color(0xFF0D59F2) : const Color(0xFF10232C);
-    final borderColor = isActive ? const Color(0x00FFFFFF) : const Color(0xFF455664);
+  Widget _buildDayCard(double w, double h, {required int index}) {
+    final isActive = _activeIndex == index;
+    final isToday  = index == _todayIndex;
+    final date     = _dates[index];
+
+    final bgColor     = isActive ? const Color(0xFF0D59F2) : const Color(0xFF10232C);
+    final borderColor = isActive
+        ? Colors.transparent
+        : isToday
+            ? const Color(0xFF0D59F2)
+            : const Color(0xFF455664);
+    final dayColor = isActive ? Colors.white : const Color(0xFF7D92B1);
 
     return Container(
-      width: w * 0.16,
-      height: h * 0.11,
+      width: w * 0.17,
+      height: h * 0.105,
       decoration: BoxDecoration(
         color: bgColor,
-        border: Border.all(color: borderColor, width: 1),
-        borderRadius: BorderRadius.circular(27),
+        border: Border.all(color: borderColor, width: isToday && !isActive ? 1.5 : 1),
+        borderRadius: BorderRadius.circular(22),
       ),
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
-        crossAxisAlignment: CrossAxisAlignment.center,
         children: [
           Text(
-            week,
-            style: TextStyle(color: color, fontSize: w * 0.038, fontWeight: FontWeight.normal),
+            _weekNames[index],
+            style: TextStyle(color: dayColor, fontSize: w * 0.032, fontWeight: FontWeight.w500, letterSpacing: 0.5),
           ),
-          SizedBox(height: h * 0.01),
+          SizedBox(height: h * 0.006),
           Text(
-            day,
-            style: TextStyle(color: const Color(0xFFFFFFFF), fontSize: w * 0.055, fontWeight: FontWeight.bold),
+            date.day.toString(),
+            style: TextStyle(color: Colors.white, fontSize: w * 0.058, fontWeight: FontWeight.bold, height: 1.0),
+          ),
+          SizedBox(height: h * 0.003),
+          Text(
+            _monthsShort[date.month],
+            style: TextStyle(
+              color: isActive ? Colors.white.withOpacity(0.75) : const Color(0xFF7D92B1),
+              fontSize: w * 0.028,
+              fontWeight: FontWeight.w400,
+            ),
           ),
         ],
       ),

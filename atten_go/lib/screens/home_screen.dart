@@ -1,12 +1,75 @@
 import 'package:flutter/material.dart';
+import '../services/schedule_service.dart';
+import '../services/attendance_service.dart';
 
-class HomeScreen extends StatelessWidget {
+class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
 
   @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> {
+  List<Lesson> _lessons = [];
+  LessonAttendance? _currentLessonStats;
+  bool _isLoading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final lessons = await ScheduleService.getTodayLessons();
+    setState(() => _lessons = lessons);
+    await _loadAttendanceStats();
+    setState(() => _isLoading = false);
+  }
+
+  Future<void> _loadAttendanceStats() async {
+    if (AttendanceService.isWeekend || _lessons.isEmpty) return;
+
+    Lesson? activeLesson;
+    for (final l in _lessons) {
+      if (getLessonStatus(l.timeStart, l.timeEnd) == LessonStatus.active) {
+        activeLesson = l;
+        break;
+      }
+    }
+    activeLesson ??= _lessons.firstWhere(
+      (l) => getLessonStatus(l.timeStart, l.timeEnd) == LessonStatus.upcoming,
+      orElse: () => _lessons.first,
+    );
+
+    final stats = await AttendanceService.getCurrentLessonStats(
+      date:      AttendanceService.todayDate(),
+      lessonKey: AttendanceService.lessonKey(activeLesson.timeStart, activeLesson.timeEnd),
+    );
+    setState(() => _currentLessonStats = stats);
+  }
+
+  int get _remainingCount =>
+      _lessons.where((l) => getLessonStatus(l.timeStart, l.timeEnd) != LessonStatus.past).length;
+
+  Lesson? get _nextLesson {
+    for (final l in _lessons) {
+      final s = getLessonStatus(l.timeStart, l.timeEnd);
+      if (s == LessonStatus.active || s == LessonStatus.upcoming) return l;
+    }
+    return null;
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final double w = MediaQuery.of(context).size.width;
-    final double h = MediaQuery.of(context).size.height;
+    final mq = MediaQuery.of(context);
+    final double w = mq.size.width;
+    final double h = mq.size.height;
+
+    // Адаптивные размеры — зажаты между min и max чтобы не ломалось на маленьких/больших экранах
+    final double fs     = w.clamp(320.0, 430.0); // base для шрифтов
+    final double hPad   = w * 0.04;
+    final double vPad   = h * 0.015;
 
     return Scaffold(
       backgroundColor: const Color(0xFF101C22),
@@ -14,175 +77,192 @@ class HomeScreen extends StatelessWidget {
         backgroundColor: const Color(0xFF101C22),
         elevation: 0,
         scrolledUnderElevation: 0,
-        toolbarHeight: h * 0.095,
+        toolbarHeight: 64,
         title: Row(
           children: [
-            Container(height: h * 0.07, child: Image.asset('assets/images/man_avatar.png')),
-            SizedBox(width: w * 0.03),
+            SizedBox(
+              height: 44,
+              width: 44,
+              child: ClipOval(child: Image.asset('assets/images/man_avatar.png', fit: BoxFit.cover)),
+            ),
+            const SizedBox(width: 12),
             Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
                 Text(
                   'Привет, Егор!',
-                  style: TextStyle(color: Colors.white, fontSize: w * 0.06, fontWeight: FontWeight.bold),
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: (fs * 0.058).clamp(18.0, 24.0),
+                    fontWeight: FontWeight.bold,
+                  ),
                 ),
                 Text(
                   'Староста • 3 курс',
-                  style: TextStyle(color: Color(0xFF7D92B1), fontSize: w * 0.035),
+                  style: TextStyle(
+                    color: const Color(0xFF7D92B1),
+                    fontSize: (fs * 0.033).clamp(11.0, 14.0),
+                  ),
                 ),
               ],
             ),
           ],
         ),
       ),
-      body: Padding(
-        padding: EdgeInsets.symmetric(horizontal: w * 0.03),
-        child: SingleChildScrollView(
-          child: Column(
-            children: [
-              SizedBox(height: h * 0.025),
-              _buildLessonsCard(w, h),
-              _sheduleToDay(w, h),
-              _attandanceGroup(w, h),
-              SizedBox(height: h * 0.03),
-            ],
-          ),
-        ),
-      ),
+      body: _isLoading
+          ? const Center(child: CircularProgressIndicator(color: Color(0xFF0D59F2)))
+          : SingleChildScrollView(
+              padding: EdgeInsets.fromLTRB(hPad, vPad, hPad, 24),
+              child: Column(
+                children: [
+                  _buildLessonsCard(fs, h),
+                  SizedBox(height: h * 0.025),
+                  _buildScheduleToday(fs, h, w),
+                  SizedBox(height: h * 0.025),
+                  _buildAttendanceGroup(fs, h),
+                  const SizedBox(height: 16),
+                ],
+              ),
+            ),
     );
   }
 
-  // Карточка с оставшимися занятиями
-  Widget _buildLessonsCard(double w, double h) {
+  // ── Карточка «Оставшиеся занятия» ──────────────────────────────────────────
+  Widget _buildLessonsCard(double fs, double h) {
+    final next = _nextLesson;
+    final nextLabel = next != null
+        ? 'След.: ${next.subject.split(' ').first} | ${next.timeStart}'
+        : 'Занятий больше нет';
+
     return Container(
       width: double.infinity,
-      padding: EdgeInsets.all(w * 0.06),
+      padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
         color: const Color(0xFF0D59F2),
-        borderRadius: BorderRadius.circular(w * 0.06),
-        boxShadow: [BoxShadow(color: const Color(0x200D59F2), blurRadius: 15, spreadRadius: 3, offset: Offset(0, 10))],
+        borderRadius: BorderRadius.circular(24),
+        boxShadow: const [
+          BoxShadow(color: Color(0x300D59F2), blurRadius: 16, spreadRadius: 2, offset: Offset(0, 8)),
+        ],
       ),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                'Оставшиеся занятия',
-                style: TextStyle(color: Colors.white70, fontSize: w * 0.035),
-              ),
-              SizedBox(height: h * 0.006),
-              Text(
-                '4',
-                style: TextStyle(color: Colors.white, fontSize: w * 0.13, fontWeight: FontWeight.bold, height: 1.0),
-              ),
-              SizedBox(height: h * 0.006),
-              Container(
-                padding: EdgeInsets.symmetric(horizontal: w * 0.035, vertical: h * 0.008),
-                decoration: BoxDecoration(color: Color(0x20FFFFFF), borderRadius: BorderRadius.circular(20)),
-                child: Text(
-                  'След.: Математика | 10:30',
-                  style: TextStyle(color: Colors.white, fontSize: w * 0.032),
-                ),
-              ),
-            ],
-          ),
-          Container(
-            width: w * 0.22,
-            height: w * 0.22,
-            decoration: const BoxDecoration(color: Color(0x10FFFFFF), shape: BoxShape.circle),
-            child: Icon(Icons.calendar_today_rounded, color: Colors.white, size: w * 0.1),
-          ),
-        ],
-      ),
-    );
-  }
-
-  // Карточки с расписанием на сегодня
-  Widget _sheduleToDay(double w, double h) {
-    return Container(
-      margin: EdgeInsets.only(top: h * 0.03),
-      width: double.infinity,
-      child: Column(
-        children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Text(
-                "Расписание на сегодня",
-                style: TextStyle(color: Colors.white, fontSize: w * 0.052),
-              ),
-              Text(
-                "Все",
-                style: TextStyle(color: Color(0xFF0D59F2), fontSize: w * 0.048),
-              ),
-            ],
-          ),
-          SizedBox(height: h * 0.015),
-          SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            physics: BouncingScrollPhysics(),
-            child: Row(
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                _buildScheduleCard(
-                  w, //
-                  h,
-                  isActive: true,
-                  subject: "Цифровые устройства",
-                  room: "Ауд. 313 • Зиаятдинов",
-                  time: "08:00 - 09:20 AM",
+                Text(
+                  'Оставшиеся занятия',
+                  style: TextStyle(color: Colors.white70, fontSize: (fs * 0.033).clamp(11.0, 14.0)),
                 ),
-                SizedBox(width: w * 0.04),
-                _buildScheduleCard(
-                  w, //
-                  h,
-                  isActive: false,
-                  subject: "Объектно-ориентированное программирование",
-                  room: "Ауд. 310 • Нехорошев",
-                  time: "09:30 - 10:50 AM",
+                const SizedBox(height: 4),
+                Text(
+                  _lessons.isEmpty ? '—' : '$_remainingCount',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: (fs * 0.18).clamp(48.0, 72.0),
+                    fontWeight: FontWeight.bold,
+                    height: 1.0,
+                  ),
                 ),
-                SizedBox(width: w * 0.04),
-                _buildScheduleCard(
-                  w, //
-                  h,
-                  isActive: false,
-                  subject: "Физическая культура",
-                  room: "Спортивный зал • Зеленин",
-                  time: "11:00 - 12:20 AM",
-                ),
-                SizedBox(width: w * 0.04),
-                _buildScheduleCard(
-                  w, //
-                  h,
-                  isActive: false,
-                  subject: "Разработка прикладных решений",
-                  room: "Ауд. 211 • Мырзабекова",
-                  time: "12:50 - 14:10 AM",
+                const SizedBox(height: 8),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: const Color(0x25FFFFFF),
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: Text(
+                    nextLabel,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(color: Colors.white, fontSize: (fs * 0.031).clamp(10.0, 13.0)),
+                  ),
                 ),
               ],
             ),
           ),
+          const SizedBox(width: 12),
+          Container(
+            width: 72,
+            height: 72,
+            decoration: const BoxDecoration(color: Color(0x15FFFFFF), shape: BoxShape.circle),
+            child: Icon(Icons.calendar_today_rounded, color: Colors.white, size: (fs * 0.1).clamp(28.0, 40.0)),
+          ),
         ],
       ),
     );
   }
 
-  // Карточка с информацией о занятии
-  Widget _buildScheduleCard(double w, double h, {required bool isActive, required String subject, required String room, required String time}) {
-    final color = isActive ? Color(0xFF0D59F2) : Color(0xFF94A3B8);
-    final bgColor = isActive ? Color(0x200D59F2) : Color(0x2094A3B8);
-    final borderColor = isActive ? Color(0xFF0D59F2) : Color(0x4094A3B8);
-    final label = isActive ? "В ПРОЦЕССЕ" : "ОЖИДАЕТСЯ";
+  // ── Расписание на сегодня ───────────────────────────────────────────────────
+  Widget _buildScheduleToday(double fs, double h, double w) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Text(
+              'Расписание на сегодня',
+              style: TextStyle(color: Colors.white, fontSize: (fs * 0.048).clamp(15.0, 20.0)),
+            ),
+            Text(
+              'Все',
+              style: TextStyle(color: const Color(0xFF0D59F2), fontSize: (fs * 0.044).clamp(14.0, 18.0)),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        if (_lessons.isEmpty)
+          Text(
+            'Сегодня занятий нет',
+            style: TextStyle(color: const Color(0xFF7D92B1), fontSize: (fs * 0.038).clamp(13.0, 16.0)),
+          )
+        else
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            physics: const BouncingScrollPhysics(),
+            child: Row(
+              children: _lessons.map((lesson) {
+                final status = getLessonStatus(lesson.timeStart, lesson.timeEnd);
+                return Padding(
+                  padding: const EdgeInsets.only(right: 12),
+                  child: _buildScheduleCard(fs, h, w, lesson: lesson, status: status),
+                );
+              }).toList(),
+            ),
+          ),
+      ],
+    );
+  }
+
+  // ── Карточка занятия ────────────────────────────────────────────────────────
+  Widget _buildScheduleCard(double fs, double h, double w, {required Lesson lesson, required LessonStatus status}) {
+    final bool isActive = status == LessonStatus.active;
+    final bool isPast   = status == LessonStatus.past;
+
+    final Color color = isActive
+        ? const Color(0xFF0D59F2)
+        : isPast ? const Color(0xFF455664) : const Color(0xFF94A3B8);
+    final Color bgColor = isActive
+        ? const Color(0x200D59F2)
+        : isPast ? const Color(0x20455664) : const Color(0x2094A3B8);
+    final Color borderColor = isActive
+        ? const Color(0xFF0D59F2)
+        : isPast ? const Color(0x40455664) : const Color(0x4094A3B8);
+    final String label = isActive ? 'В ПРОЦЕССЕ' : isPast ? 'ПРОШЛО' : 'ОЖИДАЕТСЯ';
+
+    // Ширина карточки — 75% экрана, но не меньше 240 и не больше 320
+    final double cardWidth = (w * 0.75).clamp(240.0, 320.0);
 
     return Container(
-      padding: EdgeInsets.all(w * 0.04),
-      width: w * 0.72,
+      padding: const EdgeInsets.all(16),
+      width: cardWidth,
       decoration: BoxDecoration(
         color: const Color(0xFF10232C),
-        borderRadius: BorderRadius.circular(w * 0.06),
+        borderRadius: BorderRadius.circular(22),
         border: Border.all(color: borderColor, width: 2),
       ),
       child: Column(
@@ -191,40 +271,44 @@ class HomeScreen extends StatelessWidget {
           Row(
             children: [
               Container(
-                padding: EdgeInsets.symmetric(horizontal: w * 0.025, vertical: h * 0.005),
-                decoration: BoxDecoration(color: bgColor, borderRadius: BorderRadius.circular(15)),
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                decoration: BoxDecoration(color: bgColor, borderRadius: BorderRadius.circular(12)),
                 child: Text(
                   label,
-                  style: TextStyle(color: color, fontSize: w * 0.035, fontWeight: FontWeight.bold),
+                  style: TextStyle(color: color, fontSize: (fs * 0.03).clamp(10.0, 13.0), fontWeight: FontWeight.bold),
                 ),
               ),
-              SizedBox(width: w * 0.02),
-              Icon(Icons.access_time_filled, color: color, size: w * 0.07),
+              const SizedBox(width: 8),
+              Icon(Icons.access_time_filled, color: color, size: (fs * 0.065).clamp(20.0, 28.0)),
             ],
           ),
-          SizedBox(height: h * 0.018),
+          const SizedBox(height: 12),
           Text(
-            subject,
+            lesson.subject,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              color: isPast ? const Color(0xFF7D92B1) : Colors.white,
+              fontSize: (fs * 0.046).clamp(14.0, 19.0),
+              fontWeight: FontWeight.bold,
+              height: 1.25,
+            ),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            '${lesson.room} • ${lesson.teacher}',
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
-            softWrap: false, // режет прямо посреди слова
-            style: TextStyle(color: Colors.white, fontSize: w * 0.05, fontWeight: FontWeight.bold),
+            style: TextStyle(color: const Color(0xFF7D92B1), fontSize: (fs * 0.032).clamp(10.0, 14.0)),
           ),
-          SizedBox(height: h * 0.01),
-          Text(
-            room,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(color: Color(0xFF7D92B1), fontSize: w * 0.035),
-          ),
-          SizedBox(height: h * 0.018),
+          const SizedBox(height: 12),
           Row(
             children: [
-              Icon(Icons.schedule, color: Color(0xFF7D92B1), size: w * 0.04),
-              SizedBox(width: w * 0.015),
+              Icon(Icons.schedule, color: const Color(0xFF7D92B1), size: (fs * 0.037).clamp(12.0, 16.0)),
+              const SizedBox(width: 6),
               Text(
-                time,
-                style: TextStyle(color: Color(0xFF7D92B1), fontSize: w * 0.035),
+                '${lesson.timeStart} – ${lesson.timeEnd}',
+                style: TextStyle(color: const Color(0xFF7D92B1), fontSize: (fs * 0.032).clamp(10.0, 14.0)),
               ),
             ],
           ),
@@ -233,93 +317,164 @@ class HomeScreen extends StatelessWidget {
     );
   }
 
-  // Карточка с посещаемостью группы
-  Widget _attandanceGroup(double w, double h) {
-    return Container(
-      margin: EdgeInsets.only(top: h * 0.03),
-      width: double.infinity,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            "Посещаемость группы",
-            style: TextStyle(color: Colors.white, fontSize: w * 0.052),
+  // ── Посещаемость группы ─────────────────────────────────────────────────────
+  Widget _buildAttendanceGroup(double fs, double h) {
+    final stats     = _currentLessonStats;
+    final isWeekend = AttendanceService.isWeekend;
+
+    int present = 0, absent = 0, late = 0, total = 0;
+    String percentage = '—';
+
+    if (stats != null && stats.markedCount > 0) {
+      present    = stats.presentCount;
+      absent     = stats.absentCount;
+      late       = stats.lateCount;
+      total      = stats.totalCount;
+      percentage = '${((present / total) * 100).round()}%';
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'Посещаемость группы',
+          style: TextStyle(color: Colors.white, fontSize: (fs * 0.048).clamp(15.0, 20.0)),
+        ),
+        const SizedBox(height: 12),
+        Container(
+          padding: const EdgeInsets.all(16),
+          width: double.infinity,
+          decoration: BoxDecoration(
+            color: const Color(0xFF10232C),
+            borderRadius: BorderRadius.circular(24),
+            border: Border.all(color: const Color(0x4094A3B8), width: 1.5),
           ),
-          SizedBox(height: h * 0.015),
-          Container(
-            padding: EdgeInsets.all(w * 0.04),
-            width: double.infinity,
-            decoration: BoxDecoration(
-              color: const Color(0xFF10232C),
-              borderRadius: BorderRadius.circular(w * 0.06),
-              border: Border.all(color: Color(0x4094A3B8), width: 2),
-            ),
-            child: Column(
-              children: [
-                Row(
-                  children: [
-                    Container(
-                      width: w * 0.28,
-                      height: w * 0.28,
-                      decoration: BoxDecoration(
-                        color: Color(0xFF10232C),
-                        border: Border.all(color: Color(0xFF0D59F2), width: w * 0.025),
-                        shape: BoxShape.circle,
-                      ),
-                      child: Center(
-                        child: Text(
-                          "88%",
-                          style: TextStyle(color: Colors.white, fontSize: w * 0.07, fontWeight: FontWeight.bold),
+          child: isWeekend
+              ? _buildPlaceholder(fs, icon: Icons.weekend_outlined, text: 'Сегодня выходной')
+              : stats == null
+                  ? _buildPlaceholder(fs, icon: Icons.people_outline, text: 'Никто ещё не отмечен')
+                  : Column(
+                      children: [
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                          margin: const EdgeInsets.only(bottom: 14),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF0D59F2).withOpacity(0.1),
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: Text(
+                            stats.subject,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: const Color(0xFF0D59F2),
+                              fontSize: (fs * 0.031).clamp(10.0, 13.0),
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
                         ),
-                      ),
+                        Row(
+                          children: [
+                            // Круг с процентом
+                            SizedBox(
+                              width: 88,
+                              height: 88,
+                              child: Stack(
+                                alignment: Alignment.center,
+                                children: [
+                                  Container(
+                                    decoration: BoxDecoration(
+                                      shape: BoxShape.circle,
+                                      border: Border.all(color: const Color(0xFF0D59F2), width: 6),
+                                      color: const Color(0xFF10232C),
+                                    ),
+                                  ),
+                                  Text(
+                                    percentage,
+                                    style: TextStyle(
+                                      color: Colors.white,
+                                      fontSize: (fs * 0.055).clamp(16.0, 22.0),
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            const SizedBox(width: 16),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  _buildStatRow(fs, const Color(0xFF0D59F2), 'Присутствует', '$present'),
+                                  const SizedBox(height: 10),
+                                  _buildStatRow(fs, const Color(0xFFF87171), 'Отсутствуют', '$absent'),
+                                  const SizedBox(height: 10),
+                                  _buildStatRow(fs, const Color(0xFFFACC15), 'Причина', '$late'),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 14),
+                        Text(
+                          'Отмечено: ${stats.markedCount} из $total',
+                          style: TextStyle(
+                            color: const Color(0xFF7D92B1),
+                            fontSize: (fs * 0.032).clamp(10.0, 14.0),
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          'Подробный отчет',
+                          style: TextStyle(
+                            color: const Color(0xFF0D59F2),
+                            fontSize: (fs * 0.042).clamp(13.0, 17.0),
+                          ),
+                        ),
+                      ],
                     ),
-                    SizedBox(width: w * 0.05),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          _buildStatRow(w, Color(0xFF0D59F2), "Посещаемость", "24"),
-                          SizedBox(height: h * 0.015),
-                          _buildStatRow(w, Color(0xFFF87171), "Отсутствуют", "2"),
-                          SizedBox(height: h * 0.015),
-                          _buildStatRow(w, Color(0xFFFACC15), "Опоздали", "1"),
-                        ],
-                      ),
-                    ), // ← и закрой
-                  ],
-                ),
-                SizedBox(height: h * 0.025),
-                Text(
-                  "Подробный отчет",
-                  style: TextStyle(color: Color(0xFF0D59F2), fontSize: w * 0.045),
-                ),
-              ],
+        ),
+      ],
+    );
+  }
+
+  Widget _buildPlaceholder(double fs, {required IconData icon, required String text}) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 20),
+      child: Center(
+        child: Column(
+          children: [
+            Icon(icon, color: const Color(0xFF455664), size: (fs * 0.12).clamp(36.0, 52.0)),
+            const SizedBox(height: 8),
+            Text(
+              text,
+              style: TextStyle(color: const Color(0xFF7D92B1), fontSize: (fs * 0.036).clamp(12.0, 15.0)),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
 
-  // Строка с показателем посещаемости, количеством присутствующих, отсутствующих и опоздавших
-  Widget _buildStatRow(double w, Color dotColor, String label, String value) {
+  Widget _buildStatRow(double fs, Color dotColor, String label, String value) {
     return Row(
       children: [
-        Container(
-          width: w * 0.03,
-          height: w * 0.03,
-          decoration: BoxDecoration(color: dotColor, shape: BoxShape.circle),
-        ),
-        SizedBox(width: w * 0.02),
+        Container(width: 10, height: 10, decoration: BoxDecoration(color: dotColor, shape: BoxShape.circle)),
+        const SizedBox(width: 8),
         Expanded(
           child: Text(
             label,
-            style: TextStyle(color: Colors.white, fontSize: w * 0.042),
+            style: TextStyle(color: Colors.white, fontSize: (fs * 0.038).clamp(12.0, 16.0)),
           ),
         ),
         Text(
           value,
-          style: TextStyle(color: Colors.white, fontSize: w * 0.042, fontWeight: FontWeight.bold),
+          style: TextStyle(
+            color: Colors.white,
+            fontSize: (fs * 0.038).clamp(12.0, 16.0),
+            fontWeight: FontWeight.bold,
+          ),
         ),
       ],
     );
