@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../services/attendance_service.dart';
+import '../services/group_service.dart';
 
 class StatsScreen extends StatefulWidget {
   const StatsScreen({super.key});
@@ -11,6 +12,7 @@ class StatsScreen extends StatefulWidget {
 class _StatsScreenState extends State<StatsScreen> {
   int _selectedPeriod = 0;
   bool _isLoading = true;
+  bool _hasGroup = false;
 
   List<LessonAttendance> _allLessons = [];
 
@@ -36,6 +38,13 @@ class _StatsScreenState extends State<StatsScreen> {
 
   Future<void> _loadAll() async {
     setState(() => _isLoading = true);
+    GroupService.invalidateCache();
+    final group = await GroupService.getCurrentGroup();
+    _hasGroup = group != null;
+    if (!_hasGroup) {
+      setState(() => _isLoading = false);
+      return;
+    }
     final all = await AttendanceService.loadAll();
     _allLessons = all.where((l) => l.lessonKey != 'weekend' && l.markedCount > 0).toList();
     _recalculate();
@@ -212,6 +221,35 @@ class _StatsScreenState extends State<StatsScreen> {
 
   String _formatDateHuman(DateTime d) => '${d.day} ${_monthNames[d.month]}';
 
+  Widget _buildNoGroupBody(double fs, double h) {
+    return Center(
+      child: Padding(
+        padding: EdgeInsets.all(fs * 0.06),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Container(
+              padding: EdgeInsets.all(fs * 0.06),
+              decoration: BoxDecoration(color: const Color(0xFF0D59F2).withOpacity(0.1), shape: BoxShape.circle),
+              child: Icon(Icons.group_add_outlined, color: const Color(0xFF0D59F2), size: fs * 0.14),
+            ),
+            SizedBox(height: fs * 0.04),
+            Text(
+              'Создайте группу',
+              style: TextStyle(color: Colors.white, fontSize: fs * 0.052, fontWeight: FontWeight.bold),
+            ),
+            SizedBox(height: fs * 0.02),
+            Text(
+              'Чтобы просматривать отчёты, сначала создайте группу в разделе «Профиль»',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: const Color(0xFF7D92B1), fontSize: fs * 0.036, height: 1.5),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final double w = MediaQuery.of(context).size.width;
@@ -236,6 +274,8 @@ class _StatsScreenState extends State<StatsScreen> {
       ),
       body: _isLoading
           ? const Center(child: CircularProgressIndicator(color: Color(0xFF0D59F2)))
+          : !_hasGroup
+          ? _buildNoGroupBody(fs, h)
           : RefreshIndicator(
               onRefresh: _loadAll,
               color: const Color(0xFF0D59F2),

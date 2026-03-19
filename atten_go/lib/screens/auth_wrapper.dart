@@ -46,26 +46,8 @@ class _AuthWrapperState extends State<AuthWrapper> {
           AttendanceService.invalidateCache();
           GroupService.invalidateCache();
         }
-
-        // При входе — проверяем приглашения и создаём группу если нет
-        if (event == AuthChangeEvent.signedIn) {
-          _onSignIn();
-        }
       }
     });
-  }
-
-  Future<void> _onSignIn() async {
-    // Убеждаемся что у пользователя есть группа
-    final group = await GroupService.getCurrentGroup();
-    if (group == null) {
-      // Группа не создалась автоматически — возможно старый аккаунт
-      // Проверяем есть ли приглашения
-      final invitations = await GroupService.getMyInvitations();
-      if (invitations.isEmpty) {
-        // Нет приглашений и нет группы — это проблема, но не блокируем
-      }
-    }
   }
 
   @override

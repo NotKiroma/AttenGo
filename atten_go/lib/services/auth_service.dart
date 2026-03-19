@@ -13,23 +13,16 @@ class UserProfile {
   final String? avatarUrl;
   final DateTime? createdAt;
 
-  UserProfile({
-    required this.id,
-    required this.email,
-    required this.firstName,
-    required this.lastName,
-    this.avatarUrl,
-    this.createdAt,
-  });
+  UserProfile({required this.id, required this.email, required this.firstName, required this.lastName, this.avatarUrl, this.createdAt});
 
   factory UserProfile.fromRow(Map<String, dynamic> row) => UserProfile(
-        id: row['id'] as String,
-        email: row['email'] as String? ?? '',
-        firstName: row['first_name'] as String? ?? '',
-        lastName: row['last_name'] as String? ?? '',
-        avatarUrl: row['avatar_url'] as String?,
-        createdAt: row['created_at'] != null ? DateTime.tryParse(row['created_at'] as String) : null,
-      );
+    id: row['id'] as String,
+    email: row['email'] as String? ?? '',
+    firstName: row['first_name'] as String? ?? '',
+    lastName: row['last_name'] as String? ?? '',
+    avatarUrl: row['avatar_url'] as String?,
+    createdAt: row['created_at'] != null ? DateTime.tryParse(row['created_at'] as String) : null,
+  );
 
   String get fullName => '$firstName $lastName'.trim();
 
@@ -54,18 +47,9 @@ class AuthService {
   // Регистрация
   // ══════════════════════════════════════════════════════════════════════════
 
-  static Future<({bool success, String? error})> register({
-    required String email,
-    required String password,
-    required String firstName,
-    required String lastName,
-  }) async {
+  static Future<({bool success, String? error})> register({required String email, required String password, required String firstName, required String lastName}) async {
     try {
-      final response = await _db.auth.signUp(
-        email: email.trim(),
-        password: password,
-        data: {'first_name': firstName.trim(), 'last_name': lastName.trim()},
-      );
+      final response = await _db.auth.signUp(email: email.trim(), password: password, data: {'first_name': firstName.trim(), 'last_name': lastName.trim()});
       if (response.user == null) {
         return (success: false, error: 'Не удалось создать аккаунт');
       }
@@ -86,10 +70,7 @@ class AuthService {
   // Вход
   // ══════════════════════════════════════════════════════════════════════════
 
-  static Future<({bool success, String? error})> login({
-    required String email,
-    required String password,
-  }) async {
+  static Future<({bool success, String? error})> login({required String email, required String password}) async {
     try {
       final response = await _db.auth.signInWithPassword(email: email.trim(), password: password);
       if (response.user == null) return (success: false, error: 'Неверный email или пароль');
@@ -130,31 +111,18 @@ class AuthService {
       developer.log('[AuthService] getProfile error: $e');
       final user = _db.auth.currentUser;
       if (user != null) {
-        return UserProfile(
-          id: user.id,
-          email: user.email ?? '',
-          firstName: user.userMetadata?['first_name'] as String? ?? '',
-          lastName: user.userMetadata?['last_name'] as String? ?? '',
-        );
+        return UserProfile(id: user.id, email: user.email ?? '', firstName: user.userMetadata?['first_name'] as String? ?? '', lastName: user.userMetadata?['last_name'] as String? ?? '');
       }
       return null;
     }
   }
 
-  static Future<({bool success, String? error})> updateProfile({
-    required String firstName,
-    required String lastName,
-  }) async {
+  static Future<({bool success, String? error})> updateProfile({required String firstName, required String lastName}) async {
     final uid = currentUserId;
     if (uid == null) return (success: false, error: 'Не авторизован');
     try {
-      await _db.from('profiles').update({
-        'first_name': firstName.trim(),
-        'last_name': lastName.trim(),
-      }).eq('id', uid);
-      await _db.auth.updateUser(
-        UserAttributes(data: {'first_name': firstName.trim(), 'last_name': lastName.trim()}),
-      );
+      await _db.from('profiles').update({'first_name': firstName.trim(), 'last_name': lastName.trim()}).eq('id', uid);
+      await _db.auth.updateUser(UserAttributes(data: {'first_name': firstName.trim(), 'last_name': lastName.trim()}));
       return (success: true, error: null);
     } catch (e) {
       return (success: false, error: 'Ошибка: $e');
@@ -179,13 +147,16 @@ class AuthService {
     if (uid == null) return (success: false, error: 'Не авторизован', url: null);
     try {
       final path = '$uid/avatar.$ext';
-      await _db.storage.from('avatars').uploadBinary(
-            path,
-            bytes,
-            fileOptions: FileOptions(upsert: true, contentType: 'image/$ext'),
-          );
+      final contentType = ext == 'png' ? 'image/png' : 'image/jpeg';
+
+      // Сначала пробуем update, если файл есть — иначе upload
+      try {
+        await _db.storage.from('avatars').updateBinary(path, bytes, fileOptions: FileOptions(contentType: contentType));
+      } catch (_) {
+        await _db.storage.from('avatars').uploadBinary(path, bytes, fileOptions: FileOptions(contentType: contentType));
+      }
+
       final url = _db.storage.from('avatars').getPublicUrl(path);
-      // Добавляем timestamp чтобы сбросить кеш
       final urlWithCache = '$url?t=${DateTime.now().millisecondsSinceEpoch}';
       await _db.from('profiles').update({'avatar_url': urlWithCache}).eq('id', uid);
       return (success: true, error: null, url: urlWithCache);

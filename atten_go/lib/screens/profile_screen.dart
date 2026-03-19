@@ -8,7 +8,8 @@ import '../services/db_service.dart';
 import '../utils/dark_page_route.dart';
 
 class ProfileScreen extends StatefulWidget {
-  const ProfileScreen({super.key});
+  final VoidCallback? onRoleChanged;
+  const ProfileScreen({super.key, this.onRoleChanged});
 
   @override
   State<ProfileScreen> createState() => _ProfileScreenState();
@@ -17,17 +18,16 @@ class ProfileScreen extends StatefulWidget {
 class _ProfileScreenState extends State<ProfileScreen> {
   UserProfile? _profile;
   GroupMember? _membership;
-  List<GroupMember> _members = [];
-  List<({Group group, String role})> _allGroups = [];
   Group? _currentGroup;
   bool _isLoading = true;
-  bool _isOwner = false;
 
-  // Статистика (если я — член группы)
+  // Статистика посещаемости
   int _totalLessons = 0;
   int _attended = 0;
   int _missed = 0;
   int _excused = 0;
+  final Map<String, Map<String, dynamic>> _subjectStats = {};
+  final Set<String> _expandedSubjects = {};
 
   @override
   void initState() {
@@ -38,15 +38,14 @@ class _ProfileScreenState extends State<ProfileScreen> {
   Future<void> _load() async {
     final profile = await AuthService.getProfile();
     final membership = await GroupService.getMyMembership();
-    final isOwner = await GroupService.isOwner();
-    final members = await GroupService.getMembers();
-    final allGroups = await GroupService.getAllGroups();
     final currentGroup = await GroupService.getCurrentGroup();
 
     _totalLessons = 0;
     _attended = 0;
     _missed = 0;
     _excused = 0;
+    _subjectStats.clear();
+    _expandedSubjects.clear();
     if (membership != null && membership.isStudent) {
       await _loadMyStats();
     }
@@ -55,9 +54,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
       setState(() {
         _profile = profile;
         _membership = membership;
-        _isOwner = isOwner;
-        _members = members;
-        _allGroups = allGroups;
         _currentGroup = currentGroup;
         _isLoading = false;
       });
@@ -66,22 +62,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
   Future<void> _loadMyStats() async {
     final uid = AuthService.currentUserId;
     if (uid == null) return;
-    final all = await AttendanceService.loadAll();
-    // Ищем мою запись в students по linked_user_id
-    for (final lesson in all) {
-      if (lesson.lessonKey == 'weekend') continue;
-      StudentAttendance? sa;
-      try {
-        sa = lesson.students.firstWhere((s) {
-          // Пробуем найти по student_id (может совпадать с нашим linked student)
-          return true; // Будет фильтроваться по id ниже
-        });
-      } catch (_) {
-        continue;
-      }
-      // Для простоты считаем все отмеченные
-    }
-    // Загружаем через linked_user_id
     try {
       final gid = await GroupService.getCurrentGroupId();
       if (gid == null) return;
@@ -90,6 +70,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
       if ((studentRows as List).isEmpty) return;
       final myStudentId = studentRows.first['id'] as String;
 
+      final all = await AttendanceService.loadAll();
       for (final lesson in all) {
         if (lesson.lessonKey == 'weekend') continue;
         StudentAttendance? sa;
@@ -103,26 +84,67 @@ class _ProfileScreenState extends State<ProfileScreen> {
         if (sa.status == 'present') _attended++;
         if (sa.status == 'absent') _missed++;
         if (sa.status == 'late') _excused++;
+
+        _subjectStats.putIfAbsent(lesson.subject, () => {'present': 0, 'absent': 0, 'late': 0, 'total': 0});
+        _subjectStats[lesson.subject]!['total']++;
+        _subjectStats[lesson.subject]![sa.status!] = (_subjectStats[lesson.subject]![sa.status!] as int) + 1;
       }
     } catch (_) {}
   }
 
-  Future<void> _toggleGroupMember(bool value) async {
-    await GroupService.toggleIsStudent(value);
-    await _load();
+  void _toggleGroupMember(bool value) {
+    // Optimistic update — сразу меняем UI без ожидания сервера
+    if (_membership == null) return;
+    setState(() {
+      _membership = GroupMember(id: _membership!.id, groupId: _membership!.groupId, userId: _membership!.userId, role: _membership!.role, isStudent: value, email: _membership!.email, firstName: _membership!.firstName, lastName: _membership!.lastName, avatarUrl: _membership!.avatarUrl);
+    });
+    // Запрос в фоне — не блокируем UI
+    GroupService.toggleIsStudent(value).then((_) {
+      if (mounted) _load();
+    });
   }
 
   Future<void> _pickAvatar() async {
+    // Показываем выбор источника: галерея или камера
+    final source = await showModalBottomSheet<ImageSource>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) {
+        final fs = MediaQuery.of(ctx).size.width.clamp(320.0, 430.0);
+        return Container(
+          decoration: const BoxDecoration(
+            color: Color(0xFF152028),
+            borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+          ),
+          padding: EdgeInsets.fromLTRB(fs * 0.05, 24, fs * 0.05, 40),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                'Выберите источник',
+                style: TextStyle(color: Colors.white, fontSize: fs * 0.045, fontWeight: FontWeight.bold),
+              ),
+              SizedBox(height: fs * 0.04),
+              _sourceOption(ctx, fs, Icons.photo_library_outlined, 'Галерея', ImageSource.gallery),
+              SizedBox(height: fs * 0.025),
+              _sourceOption(ctx, fs, Icons.camera_alt_outlined, 'Камера', ImageSource.camera),
+            ],
+          ),
+        );
+      },
+    );
+    if (source == null) return;
+
     try {
       final picker = ImagePicker();
-      final image = await picker.pickImage(source: ImageSource.gallery, maxWidth: 512, maxHeight: 512, imageQuality: 80);
+      final image = await picker.pickImage(source: source);
       if (image == null) return;
-      final bytes = await image.readAsBytes();
-      final ext = image.path.split('.').last.toLowerCase();
-      final validExt = ['jpg', 'jpeg', 'png', 'webp'].contains(ext) ? ext : 'jpg';
 
       setState(() => _isLoading = true);
-      final result = await AuthService.uploadAvatar(bytes, validExt == 'jpg' ? 'jpeg' : validExt);
+      final bytes = await image.readAsBytes();
+      final ext = image.name.split('.').last.toLowerCase();
+      final mime = ext == 'png' ? 'png' : 'jpeg';
+      final result = await AuthService.uploadAvatar(bytes, mime);
       if (result.success) {
         await _load();
       } else if (mounted) {
@@ -137,84 +159,59 @@ class _ProfileScreenState extends State<ProfileScreen> {
     }
   }
 
-  void _switchGroup() {
-    if (_allGroups.length <= 1) return;
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: Colors.transparent,
-      builder: (ctx) {
-        final fs = MediaQuery.of(ctx).size.width.clamp(320.0, 430.0);
-        return Container(
-          decoration: const BoxDecoration(
-            color: Color(0xFF152028),
-            borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-          ),
-          padding: EdgeInsets.fromLTRB(fs * 0.05, 24, fs * 0.05, 40),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                'Выберите группу',
-                style: TextStyle(color: Colors.white, fontSize: fs * 0.048, fontWeight: FontWeight.bold),
-              ),
-              SizedBox(height: fs * 0.04),
-              ..._allGroups.map((g) {
-                final isCurrent = g.group.id == _currentGroup?.id;
-                final ownerName = g.role == 'owner' ? 'Моя группа' : g.group.name;
-                return Padding(
-                  padding: EdgeInsets.only(bottom: fs * 0.025),
-                  child: GestureDetector(
-                    onTap: () {
-                      Navigator.pop(ctx);
-                      if (!isCurrent) {
-                        GroupService.setActiveGroup(g.group.id);
-                        AttendanceService.invalidateCache();
-                        setState(() {
-                          _isLoading = true;
-                        });
-                        _load();
-                      }
-                    },
-                    child: Container(
-                      padding: EdgeInsets.symmetric(horizontal: fs * 0.04, vertical: fs * 0.04),
-                      decoration: BoxDecoration(
-                        color: isCurrent ? const Color(0xFF0D59F2).withOpacity(0.15) : const Color(0xFF10232C),
-                        borderRadius: BorderRadius.circular(fs * 0.04),
-                        border: Border.all(color: isCurrent ? const Color(0xFF0D59F2) : const Color(0xFF455664), width: isCurrent ? 1.5 : 1),
-                      ),
-                      child: Row(
-                        children: [
-                          Icon(g.role == 'owner' ? Icons.shield_outlined : Icons.group_outlined, color: isCurrent ? const Color(0xFF0D59F2) : const Color(0xFF7D92B1), size: fs * 0.055),
-                          SizedBox(width: fs * 0.03),
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  ownerName,
-                                  style: TextStyle(color: isCurrent ? Colors.white : const Color(0xFFCBD5E0), fontSize: fs * 0.04, fontWeight: FontWeight.w600),
-                                ),
-                                SizedBox(height: 2),
-                                Text(
-                                  g.role == 'owner' ? 'Владелец' : 'Менеджер',
-                                  style: TextStyle(color: const Color(0xFF7D92B1), fontSize: fs * 0.032),
-                                ),
-                              ],
-                            ),
-                          ),
-                          if (isCurrent) Icon(Icons.check_circle, color: const Color(0xFF0D59F2), size: fs * 0.05),
-                        ],
-                      ),
-                    ),
-                  ),
-                );
-              }),
-            ],
-          ),
-        );
-      },
+  Widget _sourceOption(BuildContext ctx, double fs, IconData icon, String label, ImageSource source) {
+    return GestureDetector(
+      onTap: () => Navigator.pop(ctx, source),
+      child: Container(
+        padding: EdgeInsets.symmetric(horizontal: fs * 0.045, vertical: fs * 0.04),
+        decoration: BoxDecoration(
+          color: const Color(0xFF10232C),
+          borderRadius: BorderRadius.circular(fs * 0.04),
+          border: Border.all(color: const Color(0xFF455664)),
+        ),
+        child: Row(
+          children: [
+            Icon(icon, color: const Color(0xFF0D59F2), size: fs * 0.06),
+            SizedBox(width: fs * 0.035),
+            Text(
+              label,
+              style: TextStyle(color: Colors.white, fontSize: fs * 0.04, fontWeight: FontWeight.w500),
+            ),
+          ],
+        ),
+      ),
     );
+  }
+
+  void _createGroup() async {
+    final groupName = await showDialog<String>(
+      context: context,
+      builder: (ctx) => const _TextInputDialog(title: 'Создать группу', hint: 'Название группы', confirmLabel: 'Создать', icon: Icons.group_work_outlined),
+    );
+    if (groupName == null || groupName.trim().isEmpty) return;
+
+    setState(() => _isLoading = true);
+    final res = await GroupService.createGroup(groupName.trim());
+    if (mounted) {
+      if (res.success) {
+        AttendanceService.invalidateCache();
+        await _load();
+        widget.onRoleChanged?.call(); // пересоздаёт вкладки в MainScreen
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Группа «${res.group!.name}» создана'), backgroundColor: const Color(0xFF10232C)));
+      } else {
+        setState(() => _isLoading = false);
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(res.error ?? 'Ошибка'), backgroundColor: const Color(0xFF10232C)));
+      }
+    }
+  }
+
+  void _openMyGroup() {
+    if (_currentGroup == null) return;
+    Navigator.push(context, DarkPageRoute(builder: (_) => _MyGroupScreen(group: _currentGroup!))).then((result) {
+      _load();
+      // Если группа удалена — уведомляем главный экран об изменении роли
+      if (result == 'deleted') widget.onRoleChanged?.call();
+    });
   }
 
   void _editProfile() async {
@@ -224,15 +221,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
   }
 
   void _changePassword() => Navigator.push(context, DarkPageRoute(builder: (_) => const _ChangePasswordScreen()));
-
-  void _inviteManager() => Navigator.push(context, DarkPageRoute(builder: (_) => const _InviteScreen()));
-
-  void _viewMembers() => Navigator.push(
-    context,
-    DarkPageRoute(
-      builder: (_) => _MembersScreen(members: _members, isOwner: _isOwner),
-    ),
-  );
 
   void _logout() {
     showDialog(
@@ -317,14 +305,14 @@ class _ProfileScreenState extends State<ProfileScreen> {
                     SizedBox(height: h * 0.012),
 
                     // Моя статистика (если член группы)
-                    if (_membership?.isStudent == true) ...[_buildMyStats(fs, h), SizedBox(height: h * 0.02)],
+                    if (_membership?.isStudent == true) ...[_buildStatsGrid(fs, h), SizedBox(height: h * 0.012), if (_subjectStats.isNotEmpty) _buildSubjectStats(fs, h), SizedBox(height: h * 0.008)],
 
-                    // Переключатель группы (если больше одной)
-                    if (_allGroups.length > 1) ...[
-                      _buildActionTile(fs: fs, icon: Icons.swap_horiz_rounded, label: _currentGroup?.name ?? 'Группа', subtitle: '${_allGroups.length} групп • Нажми чтобы переключить', onTap: _switchGroup, color: const Color(0xFF0D59F2)),
+                    // Группа
+                    if (_currentGroup != null) ...[
+                      _buildActionTile(fs: fs, icon: Icons.group_work_outlined, label: _currentGroup!.name, subtitle: 'Моя группа • Нажми чтобы открыть', onTap: _openMyGroup),
                       SizedBox(height: h * 0.012),
-                    ] else if (_currentGroup != null) ...[
-                      _buildActionTile(fs: fs, icon: Icons.group_work_outlined, label: _currentGroup!.name, onTap: () {}),
+                    ] else ...[
+                      _buildActionTile(fs: fs, icon: Icons.group_add_outlined, label: 'Создать группу', subtitle: 'Группа пока не создана', onTap: _createGroup, color: const Color(0xFF0D59F2)),
                       SizedBox(height: h * 0.012),
                     ],
 
@@ -332,10 +320,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
                     _buildActionTile(fs: fs, icon: Icons.edit_outlined, label: 'Редактировать профиль', onTap: _editProfile),
                     SizedBox(height: h * 0.012),
                     _buildActionTile(fs: fs, icon: Icons.lock_outline, label: 'Сменить пароль', onTap: _changePassword),
-                    SizedBox(height: h * 0.012),
-                    _buildActionTile(fs: fs, icon: Icons.group_add_outlined, label: 'Пригласить в группу', onTap: _inviteManager),
-                    SizedBox(height: h * 0.012),
-                    _buildActionTile(fs: fs, icon: Icons.people_outline, label: 'Участники группы (${_members.length})', onTap: _viewMembers),
                     SizedBox(height: h * 0.012),
                     _buildActionTile(fs: fs, icon: Icons.logout_rounded, label: 'Выйти', onTap: _logout, color: const Color(0xFFF87171)),
                   ],
@@ -466,12 +450,61 @@ class _ProfileScreenState extends State<ProfileScreen> {
     );
   }
 
-  Widget _buildMyStats(double fs, double h) {
-    final attendPct = _totalLessons > 0 ? ((_attended / _totalLessons) * 100).round() : 0;
-    final missedPct = _totalLessons > 0 ? ((_missed / _totalLessons) * 100).round() : 0;
+  // ── Статистика: 4 карточки как в StudentProfileScreen ──
 
+  double _attendPercent() {
+    if (_totalLessons == 0) return 0;
+    return _attended / _totalLessons;
+  }
+
+  Color _gradeColor(double p) {
+    if (p >= 0.9) return const Color(0xFF34D399);
+    if (p >= 0.7) return const Color(0xFFFACC15);
+    return const Color(0xFFF87171);
+  }
+
+  String _grade(double p) {
+    if (p >= 0.9) return 'ХОРОШО';
+    if (p >= 0.7) return 'СРЕДНЕ';
+    return 'ПЛОХО';
+  }
+
+  Widget _buildStatsGrid(double fs, double h) {
+    final attendPct = _totalLessons > 0 ? ((_attended / _totalLessons) * 100).toStringAsFixed(1) : '0';
+    final missedPct = _totalLessons > 0 ? ((_missed / _totalLessons) * 100).toStringAsFixed(1) : '0';
+    final excusedPct = _totalLessons > 0 ? ((_excused / _totalLessons) * 100).toStringAsFixed(1) : '0';
+
+    return Column(
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: _statCard(fs, h, label: 'Всего занятий', value: '$_totalLessons', badge: '100%', badgeColor: const Color(0xFF34D399)),
+            ),
+            SizedBox(width: fs * 0.03),
+            Expanded(
+              child: _statCard(fs, h, label: 'Посещено', value: '$_attended', badge: '$attendPct%', badgeColor: const Color(0xFF34D399)),
+            ),
+          ],
+        ),
+        SizedBox(height: fs * 0.03),
+        Row(
+          children: [
+            Expanded(
+              child: _statCard(fs, h, label: 'Пропущено', value: '$_missed', badge: '$missedPct%', badgeColor: const Color(0xFFF87171)),
+            ),
+            SizedBox(width: fs * 0.03),
+            Expanded(
+              child: _statCard(fs, h, label: 'Уважительных', value: '$_excused', badge: '$excusedPct%', badgeColor: const Color(0xFFFACC15)),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _statCard(double fs, double h, {required String label, required String value, required String badge, required Color badgeColor}) {
     return Container(
-      width: double.infinity,
       padding: EdgeInsets.all(fs * 0.04),
       decoration: BoxDecoration(
         color: const Color(0xFF10232C),
@@ -482,61 +515,191 @@ class _ProfileScreenState extends State<ProfileScreen> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            'Моя посещаемость',
-            style: TextStyle(color: Colors.white, fontSize: fs * 0.04, fontWeight: FontWeight.bold),
+            label,
+            style: TextStyle(color: const Color(0xFF7D92B1), fontSize: fs * 0.033),
           ),
-          SizedBox(height: h * 0.015),
-          Row(
-            children: [
-              _miniStat(fs, 'Всего', '$_totalLessons', const Color(0xFF0D59F2)),
-              SizedBox(width: fs * 0.03),
-              _miniStat(fs, 'Был', '$_attended ($attendPct%)', const Color(0xFF34D399)),
-              SizedBox(width: fs * 0.03),
-              _miniStat(fs, 'Пропуск', '$_missed ($missedPct%)', const Color(0xFFF87171)),
-            ],
+          SizedBox(height: h * 0.006),
+          Text(
+            value,
+            style: TextStyle(color: const Color(0xFF0D59F2), fontSize: fs * 0.09, fontWeight: FontWeight.bold, height: 1.0),
           ),
-          if (_totalLessons > 0) ...[
-            SizedBox(height: h * 0.012),
-            LayoutBuilder(
-              builder: (_, c) {
-                final p = _totalLessons > 0 ? _attended / _totalLessons : 0.0;
-                return Stack(
-                  children: [
-                    Container(
-                      height: fs * 0.018,
-                      width: c.maxWidth,
-                      decoration: BoxDecoration(color: const Color(0xFF455664), borderRadius: BorderRadius.circular(fs * 0.04)),
-                    ),
-                    Container(
-                      height: fs * 0.018,
-                      width: c.maxWidth * p.clamp(0.0, 1.0),
-                      decoration: BoxDecoration(color: const Color(0xFF34D399), borderRadius: BorderRadius.circular(fs * 0.04)),
-                    ),
-                  ],
-                );
-              },
+          SizedBox(height: h * 0.008),
+          Container(
+            padding: EdgeInsets.symmetric(horizontal: fs * 0.025, vertical: 3),
+            decoration: BoxDecoration(color: badgeColor.withOpacity(0.15), borderRadius: BorderRadius.circular(fs * 0.04)),
+            child: Text(
+              badge,
+              style: TextStyle(color: badgeColor, fontSize: fs * 0.028, fontWeight: FontWeight.bold),
             ),
-          ],
+          ),
         ],
       ),
     );
   }
 
-  Widget _miniStat(double fs, String label, String value, Color color) {
+  Widget _buildSubjectStats(double fs, double h) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Text(
+              'По предметам',
+              style: TextStyle(color: Colors.white, fontSize: fs * 0.044, fontWeight: FontWeight.bold),
+            ),
+            GestureDetector(
+              onTap: () => setState(() {
+                if (_expandedSubjects.length == _subjectStats.length) {
+                  _expandedSubjects.clear();
+                } else {
+                  _expandedSubjects.addAll(_subjectStats.keys);
+                }
+              }),
+              child: Text(
+                _expandedSubjects.length == _subjectStats.length ? 'Свернуть все' : 'Развернуть все',
+                style: TextStyle(color: const Color(0xFF0D59F2), fontSize: fs * 0.033),
+              ),
+            ),
+          ],
+        ),
+        SizedBox(height: h * 0.015),
+        ..._subjectStats.entries.map((e) => _subjectCard(fs, h, e.key, e.value)),
+      ],
+    );
+  }
+
+  Widget _subjectCard(double fs, double h, String subject, Map<String, dynamic> stats) {
+    final total = stats['total'] as int;
+    final p = total == 0 ? 0.0 : (stats['present'] as int) / total;
+    final pInt = (p * 100).round();
+    final color = _gradeColor(p);
+    final grade = _grade(p);
+    final isExpanded = _expandedSubjects.contains(subject);
+
+    return GestureDetector(
+      onTap: () => setState(() {
+        if (isExpanded)
+          _expandedSubjects.remove(subject);
+        else
+          _expandedSubjects.add(subject);
+      }),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        margin: EdgeInsets.only(bottom: h * 0.012),
+        padding: EdgeInsets.all(fs * 0.04),
+        decoration: BoxDecoration(
+          color: const Color(0xFF10232C),
+          borderRadius: BorderRadius.circular(fs * 0.04),
+          border: Border.all(color: const Color(0xFF455664), width: 1),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    subject,
+                    style: TextStyle(color: Colors.white, fontSize: fs * 0.04, fontWeight: FontWeight.bold, height: 1.3),
+                  ),
+                ),
+                SizedBox(width: fs * 0.02),
+                Container(
+                  padding: EdgeInsets.symmetric(horizontal: fs * 0.025, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: color.withOpacity(0.15),
+                    borderRadius: BorderRadius.circular(fs * 0.04),
+                    border: Border.all(color: color.withOpacity(0.5)),
+                  ),
+                  child: Text(
+                    grade,
+                    style: TextStyle(color: color, fontSize: fs * 0.027, fontWeight: FontWeight.bold),
+                  ),
+                ),
+                SizedBox(width: fs * 0.02),
+                AnimatedRotation(
+                  turns: isExpanded ? 0.5 : 0.0,
+                  duration: const Duration(milliseconds: 200),
+                  child: Icon(Icons.keyboard_arrow_down_rounded, color: const Color(0xFF7D92B1), size: fs * 0.06),
+                ),
+              ],
+            ),
+            SizedBox(height: h * 0.006),
+            Text(
+              '$pInt% посещаемости',
+              style: TextStyle(color: color, fontSize: fs * 0.032, fontWeight: FontWeight.w600),
+            ),
+            if (isExpanded) ...[
+              SizedBox(height: h * 0.012),
+              Container(height: 1, color: const Color(0xFF455664).withOpacity(0.5)),
+              SizedBox(height: h * 0.012),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text(
+                    'Посещаемость',
+                    style: TextStyle(color: const Color(0xFF7D92B1), fontSize: fs * 0.033),
+                  ),
+                  Text(
+                    '$pInt%',
+                    style: TextStyle(color: color, fontSize: fs * 0.036, fontWeight: FontWeight.bold),
+                  ),
+                ],
+              ),
+              SizedBox(height: h * 0.008),
+              LayoutBuilder(
+                builder: (_, constraints) {
+                  return Stack(
+                    children: [
+                      Container(
+                        height: fs * 0.015,
+                        width: constraints.maxWidth,
+                        decoration: BoxDecoration(color: const Color(0xFF455664), borderRadius: BorderRadius.circular(fs * 0.04)),
+                      ),
+                      Container(
+                        height: fs * 0.015,
+                        width: constraints.maxWidth * p.clamp(0.0, 1.0),
+                        decoration: BoxDecoration(color: color, borderRadius: BorderRadius.circular(fs * 0.04)),
+                      ),
+                    ],
+                  );
+                },
+              ),
+              SizedBox(height: h * 0.012),
+              Row(
+                children: [
+                  _detailChip(fs, 'Присутствие', '${stats['present']}', const Color(0xFF34D399)),
+                  SizedBox(width: fs * 0.02),
+                  _detailChip(fs, 'Пропуски', '${stats['absent']}', const Color(0xFFF87171)),
+                  SizedBox(width: fs * 0.02),
+                  _detailChip(fs, 'Причина', '${stats['late']}', const Color(0xFFFACC15)),
+                ],
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _detailChip(double fs, String label, String value, Color color) {
     return Expanded(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            label,
-            style: TextStyle(color: const Color(0xFF7D92B1), fontSize: fs * 0.028),
-          ),
-          SizedBox(height: 2),
-          Text(
-            value,
-            style: TextStyle(color: color, fontSize: fs * 0.034, fontWeight: FontWeight.bold),
-          ),
-        ],
+      child: Container(
+        padding: EdgeInsets.symmetric(vertical: fs * 0.02),
+        decoration: BoxDecoration(color: color.withOpacity(0.08), borderRadius: BorderRadius.circular(fs * 0.04)),
+        child: Column(
+          children: [
+            Text(
+              value,
+              style: TextStyle(color: color, fontSize: fs * 0.038, fontWeight: FontWeight.bold),
+            ),
+            Text(
+              label,
+              style: TextStyle(color: color.withOpacity(0.7), fontSize: fs * 0.025),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -616,57 +779,110 @@ class _ProfileScreenState extends State<ProfileScreen> {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// ЭКРАН ПРИГЛАШЕНИЯ
+// ЭКРАН «МОЯ ГРУППА»
 // ═══════════════════════════════════════════════════════════════════════════════
 
-class _InviteScreen extends StatefulWidget {
-  const _InviteScreen();
+class _MyGroupScreen extends StatefulWidget {
+  final Group group;
+  const _MyGroupScreen({required this.group});
+
   @override
-  State<_InviteScreen> createState() => _InviteScreenState();
+  State<_MyGroupScreen> createState() => _MyGroupScreenState();
 }
 
-class _InviteScreenState extends State<_InviteScreen> {
-  final _emailCtrl = TextEditingController();
-  bool _isStudent = false;
-  bool _isSending = false;
-  String? _message;
-  bool _isError = false;
+class _MyGroupScreenState extends State<_MyGroupScreen> {
+  List<GroupMember> _members = [];
+  bool _isLoading = true;
+  bool _isOwner = false;
 
   @override
-  void dispose() {
-    _emailCtrl.dispose();
-    super.dispose();
+  void initState() {
+    super.initState();
+    _load();
   }
 
-  Future<void> _send() async {
-    final email = _emailCtrl.text.trim();
-    if (email.isEmpty) {
+  Future<void> _load() async {
+    final members = await GroupService.getMembers();
+    final isOwner = await GroupService.isOwner();
+    if (mounted)
       setState(() {
-        _message = 'Введите email';
-        _isError = true;
+        _members = members;
+        _isOwner = isOwner;
+        _isLoading = false;
       });
-      return;
-    }
+  }
 
-    setState(() {
-      _isSending = true;
-      _message = null;
-    });
-    final result = await GroupService.invite(email: email, isStudent: _isStudent);
+  void _addMember() async {
+    await _showInviteDialog('member');
+  }
+
+  Future<void> _deleteGroup() async {
+    final fs = MediaQuery.of(context).size.width.clamp(320.0, 430.0);
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF10232C),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(fs * 0.04)),
+        title: Text(
+          'Удалить группу?',
+          style: TextStyle(color: Colors.white, fontSize: fs * 0.045),
+        ),
+        content: Text(
+          'Это действие нельзя отменить. Все участники, студенты и данные посещаемости будут удалены.',
+          style: TextStyle(color: const Color(0xFF7D92B1), fontSize: fs * 0.035),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: Text(
+              'Отмена',
+              style: TextStyle(color: const Color(0xFF7D92B1), fontSize: fs * 0.036),
+            ),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text(
+              'Удалить',
+              style: TextStyle(color: const Color(0xFFF87171), fontSize: fs * 0.036, fontWeight: FontWeight.w700),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    setState(() => _isLoading = true);
+    final res = await GroupService.deleteGroup();
     if (mounted) {
-      setState(() {
-        _isSending = false;
-        _isError = !result.success;
-        _message = result.success ? 'Приглашение отправлено!' : result.error;
-        if (result.success) _emailCtrl.clear();
-      });
+      if (res.success) {
+        GroupService.invalidateCache();
+        // Возвращаемся на профиль и перезагружаем его
+        Navigator.pop(context, 'deleted');
+      } else {
+        setState(() => _isLoading = false);
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(res.error ?? 'Ошибка'), backgroundColor: const Color(0xFF10232C)));
+      }
+    }
+  }
+
+  Future<void> _showInviteDialog(String initialRole) async {
+    final result = await showDialog<({String email, String role})>(
+      context: context,
+      builder: (ctx) => _InviteDialog(initialRole: initialRole),
+    );
+    if (result == null || result.email.isEmpty) return;
+
+    setState(() => _isLoading = true);
+    final res = await GroupService.sendInvitation(email: result.email, role: result.role);
+    if (mounted) {
+      setState(() => _isLoading = false);
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(res.success ? 'Приглашение отправлено' : (res.error ?? 'Ошибка')), backgroundColor: const Color(0xFF10232C)));
     }
   }
 
   @override
   Widget build(BuildContext context) {
     final w = MediaQuery.of(context).size.width;
-    final h = MediaQuery.of(context).size.height;
     final fs = w.clamp(320.0, 430.0);
 
     return Scaffold(
@@ -675,7 +891,7 @@ class _InviteScreenState extends State<_InviteScreen> {
         elevation: 0,
         scrolledUnderElevation: 0,
         title: Text(
-          'Пригласить',
+          widget.group.name,
           style: TextStyle(color: Colors.white, fontSize: fs * 0.05, fontWeight: FontWeight.bold),
         ),
         centerTitle: true,
@@ -684,224 +900,141 @@ class _InviteScreenState extends State<_InviteScreen> {
           icon: const Icon(Icons.arrow_back_ios_new, color: Colors.white),
           onPressed: () => Navigator.pop(context),
         ),
+        actions: [
+          IconButton(
+            icon: Icon(Icons.person_add_outlined, color: const Color(0xFF0D59F2), size: fs * 0.055),
+            onPressed: _addMember,
+            tooltip: 'Пригласить',
+          ),
+          if (_isOwner)
+            IconButton(
+              icon: Icon(Icons.delete_outline_rounded, color: const Color(0xFFF87171), size: fs * 0.055),
+              onPressed: _deleteGroup,
+              tooltip: 'Удалить группу',
+            ),
+        ],
         bottom: PreferredSize(
           preferredSize: const Size.fromHeight(1),
           child: Container(color: const Color(0xFF455664), height: 1),
         ),
       ),
-      body: SingleChildScrollView(
-        padding: EdgeInsets.symmetric(horizontal: w * 0.06).add(EdgeInsets.only(top: h * 0.03, bottom: h * 0.04)),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'Email приглашаемого',
-              style: TextStyle(color: Colors.white, fontSize: fs * 0.038, fontWeight: FontWeight.w600),
-            ),
-            SizedBox(height: h * 0.008),
-            Container(
-              decoration: BoxDecoration(
-                color: const Color(0xFF10232C),
-                borderRadius: BorderRadius.circular(fs * 0.04),
-                border: Border.all(color: const Color(0xFF455664), width: 1),
-              ),
-              child: TextField(
-                controller: _emailCtrl,
-                keyboardType: TextInputType.emailAddress,
-                style: TextStyle(color: Colors.white, fontSize: fs * 0.038),
-                decoration: InputDecoration(
-                  hintText: 'example@mail.com',
-                  hintStyle: TextStyle(color: const Color(0xFF7D92B1), fontSize: fs * 0.035),
-                  prefixIcon: Icon(Icons.email_outlined, color: const Color(0xFF7D92B1), size: fs * 0.05),
-                  border: InputBorder.none,
-                  contentPadding: EdgeInsets.symmetric(horizontal: fs * 0.04, vertical: fs * 0.038),
-                ),
-              ),
-            ),
-            SizedBox(height: h * 0.02),
-            Container(
-              padding: EdgeInsets.symmetric(horizontal: fs * 0.045, vertical: fs * 0.03),
-              decoration: BoxDecoration(
-                color: const Color(0xFF10232C),
-                borderRadius: BorderRadius.circular(fs * 0.04),
-                border: Border.all(color: const Color(0xFF455664), width: 1),
-              ),
-              child: Row(
-                children: [
-                  Icon(Icons.how_to_reg_outlined, color: const Color(0xFF0D59F2), size: fs * 0.05),
-                  SizedBox(width: fs * 0.03),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
+      body: _isLoading
+          ? const Center(child: CircularProgressIndicator(color: Color(0xFF0D59F2)))
+          : RefreshIndicator(
+              onRefresh: _load,
+              color: const Color(0xFF0D59F2),
+              backgroundColor: const Color(0xFF10232C),
+              child: _members.isEmpty
+                  ? ListView(
+                      physics: const AlwaysScrollableScrollPhysics(),
                       children: [
-                        Text(
-                          'Является участником',
-                          style: TextStyle(color: Colors.white, fontSize: fs * 0.036, fontWeight: FontWeight.w500),
-                        ),
-                        Text(
-                          'Будет в списке студентов',
-                          style: TextStyle(color: const Color(0xFF7D92B1), fontSize: fs * 0.028),
+                        SizedBox(height: MediaQuery.of(context).size.height * 0.3),
+                        Center(
+                          child: Column(
+                            children: [
+                              Icon(Icons.people_outline, color: const Color(0xFF455664), size: fs * 0.15),
+                              SizedBox(height: fs * 0.03),
+                              Text(
+                                'Нет участников',
+                                style: TextStyle(color: const Color(0xFF7D92B1), fontSize: fs * 0.04),
+                              ),
+                              SizedBox(height: fs * 0.015),
+                              GestureDetector(
+                                onTap: _addMember,
+                                child: Text(
+                                  'Добавить пользователя',
+                                  style: TextStyle(color: const Color(0xFF0D59F2), fontSize: fs * 0.038, fontWeight: FontWeight.w500),
+                                ),
+                              ),
+                            ],
+                          ),
                         ),
                       ],
+                    )
+                  : ListView.separated(
+                      physics: const AlwaysScrollableScrollPhysics(),
+                      padding: EdgeInsets.symmetric(horizontal: w * 0.04, vertical: w * 0.04),
+                      itemCount: _members.length,
+                      separatorBuilder: (_, __) => const SizedBox(height: 10),
+                      itemBuilder: (_, i) {
+                        final m = _members[i];
+                        final initials = _initials(m.fullName.isNotEmpty ? m.fullName : (m.email ?? '?'));
+                        return Container(
+                          padding: EdgeInsets.all(fs * 0.04),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF10232C),
+                            borderRadius: BorderRadius.circular(fs * 0.04),
+                            border: Border.all(color: const Color(0xFF455664), width: 1),
+                          ),
+                          child: Row(
+                            children: [
+                              Container(
+                                width: fs * 0.12,
+                                height: fs * 0.12,
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  color: const Color(0xFF0D59F2),
+                                  image: m.avatarUrl != null ? DecorationImage(image: NetworkImage(m.avatarUrl!), fit: BoxFit.cover) : null,
+                                ),
+                                child: m.avatarUrl == null
+                                    ? Center(
+                                        child: Text(
+                                          initials,
+                                          style: TextStyle(color: Colors.white, fontSize: fs * 0.04, fontWeight: FontWeight.bold),
+                                        ),
+                                      )
+                                    : null,
+                              ),
+                              SizedBox(width: fs * 0.03),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      m.fullName.isNotEmpty ? m.fullName : m.email ?? '—',
+                                      style: TextStyle(color: Colors.white, fontSize: fs * 0.038, fontWeight: FontWeight.w600),
+                                    ),
+                                    if (m.email != null && m.fullName.isNotEmpty)
+                                      Text(
+                                        m.email!,
+                                        style: TextStyle(color: const Color(0xFF7D92B1), fontSize: fs * 0.03),
+                                      ),
+                                    SizedBox(height: 4),
+                                    Row(children: [_badge(fs, m.isOwner ? 'Владелец' : 'Участник', m.isOwner ? const Color(0xFF0D59F2) : const Color(0xFF455664))]),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                        );
+                      },
                     ),
-                  ),
-                  Switch.adaptive(value: _isStudent, onChanged: (v) => setState(() => _isStudent = v), activeColor: const Color(0xFF0D59F2), inactiveTrackColor: const Color(0xFF455664)),
-                ],
-              ),
             ),
-            if (_message != null) ...[
-              SizedBox(height: h * 0.015),
-              Container(
-                width: double.infinity,
-                padding: EdgeInsets.all(fs * 0.03),
-                decoration: BoxDecoration(
-                  color: (_isError ? const Color(0xFFF87171) : const Color(0xFF34D399)).withOpacity(0.1),
-                  borderRadius: BorderRadius.circular(fs * 0.04),
-                  border: Border.all(color: (_isError ? const Color(0xFFF87171) : const Color(0xFF34D399)).withOpacity(0.3)),
-                ),
-                child: Text(
-                  _message!,
-                  style: TextStyle(color: _isError ? const Color(0xFFF87171) : const Color(0xFF34D399), fontSize: fs * 0.033),
-                ),
-              ),
-            ],
-            SizedBox(height: h * 0.035),
-            SizedBox(
-              width: double.infinity,
-              child: ElevatedButton(
-                onPressed: _isSending ? null : _send,
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: const Color(0xFF0D59F2),
-                  foregroundColor: Colors.white,
-                  disabledBackgroundColor: const Color(0xFF455664),
-                  padding: EdgeInsets.symmetric(vertical: h * 0.02),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(fs * 0.04)),
-                ),
-                child: _isSending
-                    ? SizedBox(
-                        width: fs * 0.055,
-                        height: fs * 0.055,
-                        child: const CircularProgressIndicator(color: Colors.white, strokeWidth: 2),
-                      )
-                    : Text(
-                        'Отправить приглашение',
-                        style: TextStyle(fontSize: fs * 0.04, fontWeight: FontWeight.w600),
-                      ),
-              ),
-            ),
-          ],
+      bottomNavigationBar: Padding(
+        padding: EdgeInsets.fromLTRB(w * 0.04, 0, w * 0.04, MediaQuery.of(context).padding.bottom + 16),
+        child: ElevatedButton.icon(
+          onPressed: _addMember,
+          icon: const Icon(Icons.person_add_outlined),
+          label: const Text('Добавить пользователя'),
+          style: ElevatedButton.styleFrom(
+            backgroundColor: const Color(0xFF0D59F2),
+            foregroundColor: Colors.white,
+            padding: const EdgeInsets.symmetric(vertical: 14),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(fs * 0.04)),
+            textStyle: TextStyle(fontSize: fs * 0.04, fontWeight: FontWeight.w600),
+          ),
         ),
       ),
     );
   }
-}
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// ЭКРАН УЧАСТНИКОВ ГРУППЫ
-// ═══════════════════════════════════════════════════════════════════════════════
-
-class _MembersScreen extends StatelessWidget {
-  final List<GroupMember> members;
-  final bool isOwner;
-  const _MembersScreen({required this.members, required this.isOwner});
-
-  @override
-  Widget build(BuildContext context) {
-    final w = MediaQuery.of(context).size.width;
-    final fs = w.clamp(320.0, 430.0);
-
-    return Scaffold(
-      backgroundColor: const Color(0xFF101C22),
-      appBar: AppBar(
-        elevation: 0,
-        scrolledUnderElevation: 0,
-        title: Text(
-          'Участники',
-          style: TextStyle(color: Colors.white, fontSize: fs * 0.05, fontWeight: FontWeight.bold),
-        ),
-        centerTitle: true,
-        backgroundColor: const Color(0xFF101C22),
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back_ios_new, color: Colors.white),
-          onPressed: () => Navigator.pop(context),
-        ),
-        bottom: PreferredSize(
-          preferredSize: const Size.fromHeight(1),
-          child: Container(color: const Color(0xFF455664), height: 1),
-        ),
-      ),
-      body: ListView.separated(
-        padding: EdgeInsets.symmetric(horizontal: w * 0.04, vertical: w * 0.04),
-        itemCount: members.length,
-        separatorBuilder: (_, __) => const SizedBox(height: 10),
-        itemBuilder: (_, i) {
-          final m = members[i];
-          return Container(
-            padding: EdgeInsets.all(fs * 0.04),
-            decoration: BoxDecoration(
-              color: const Color(0xFF10232C),
-              borderRadius: BorderRadius.circular(fs * 0.04),
-              border: Border.all(color: const Color(0xFF455664), width: 1),
-            ),
-            child: Row(
-              children: [
-                Container(
-                  width: fs * 0.12,
-                  height: fs * 0.12,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: const Color(0xFF0D59F2),
-                    image: m.avatarUrl != null ? DecorationImage(image: NetworkImage(m.avatarUrl!), fit: BoxFit.cover) : null,
-                  ),
-                  child: m.avatarUrl == null
-                      ? Center(
-                          child: Text(
-                            _initials(m.fullName),
-                            style: TextStyle(color: Colors.white, fontSize: fs * 0.04, fontWeight: FontWeight.bold),
-                          ),
-                        )
-                      : null,
-                ),
-                SizedBox(width: fs * 0.03),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        m.fullName.isNotEmpty ? m.fullName : m.email ?? '—',
-                        style: TextStyle(color: Colors.white, fontSize: fs * 0.038, fontWeight: FontWeight.w600),
-                      ),
-                      const SizedBox(height: 2),
-                      Row(
-                        children: [
-                          Container(
-                            padding: EdgeInsets.symmetric(horizontal: fs * 0.02, vertical: 2),
-                            decoration: BoxDecoration(color: m.isOwner ? const Color(0xFF0D59F2).withOpacity(0.15) : const Color(0xFF455664).withOpacity(0.3), borderRadius: BorderRadius.circular(fs * 0.04)),
-                            child: Text(
-                              m.isOwner ? 'Владелец' : 'Менеджер',
-                              style: TextStyle(color: m.isOwner ? const Color(0xFF0D59F2) : const Color(0xFF7D92B1), fontSize: fs * 0.025, fontWeight: FontWeight.w600),
-                            ),
-                          ),
-                          if (m.isStudent) ...[
-                            SizedBox(width: fs * 0.02),
-                            Container(
-                              padding: EdgeInsets.symmetric(horizontal: fs * 0.02, vertical: 2),
-                              decoration: BoxDecoration(color: const Color(0xFF34D399).withOpacity(0.15), borderRadius: BorderRadius.circular(fs * 0.04)),
-                              child: Text(
-                                'Участник',
-                                style: TextStyle(color: const Color(0xFF34D399), fontSize: fs * 0.025, fontWeight: FontWeight.w600),
-                              ),
-                            ),
-                          ],
-                        ],
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-          );
-        },
+  Widget _badge(double fs, String label, Color color) {
+    return Container(
+      padding: EdgeInsets.symmetric(horizontal: fs * 0.025, vertical: 2),
+      decoration: BoxDecoration(color: color.withOpacity(0.15), borderRadius: BorderRadius.circular(fs * 0.04)),
+      child: Text(
+        label,
+        style: TextStyle(color: color, fontSize: fs * 0.026, fontWeight: FontWeight.w600),
       ),
     );
   }
@@ -1218,6 +1351,227 @@ class _ChangePasswordScreenState extends State<_ChangePasswordScreen> {
           contentPadding: EdgeInsets.symmetric(horizontal: fs * 0.04, vertical: fs * 0.038),
         ),
       ),
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ДИАЛОГ ПРИГЛАШЕНИЯ (контроллер в State — не пересоздаётся при rebuild)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+class _InviteDialog extends StatefulWidget {
+  final String initialRole;
+  const _InviteDialog({required this.initialRole});
+  @override
+  State<_InviteDialog> createState() => _InviteDialogState();
+}
+
+class _InviteDialogState extends State<_InviteDialog> {
+  late final TextEditingController _ctrl;
+  late String _role;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = TextEditingController();
+    _role = widget.initialRole;
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final fs = MediaQuery.of(context).size.width.clamp(320.0, 430.0);
+    return AlertDialog(
+      backgroundColor: const Color(0xFF10232C),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(fs * 0.04)),
+      title: Text(
+        'Пригласить в группу',
+        style: TextStyle(color: Colors.white, fontSize: fs * 0.042),
+      ),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            decoration: BoxDecoration(
+              color: const Color(0xFF152028),
+              borderRadius: BorderRadius.circular(fs * 0.03),
+              border: Border.all(color: const Color(0xFF455664)),
+            ),
+            child: TextField(
+              controller: _ctrl,
+              autofocus: true,
+              keyboardType: TextInputType.emailAddress,
+              style: TextStyle(color: Colors.white, fontSize: fs * 0.038),
+              onSubmitted: (v) => Navigator.pop(context, (email: v.trim(), role: _role)),
+              decoration: InputDecoration(
+                hintText: 'Email пользователя',
+                hintStyle: TextStyle(color: const Color(0xFF7D92B1), fontSize: fs * 0.035),
+                prefixIcon: Icon(Icons.email_outlined, color: const Color(0xFF7D92B1), size: fs * 0.05),
+                border: InputBorder.none,
+                contentPadding: EdgeInsets.symmetric(horizontal: fs * 0.04, vertical: fs * 0.038),
+              ),
+            ),
+          ),
+          SizedBox(height: fs * 0.03),
+          // Выбор роли
+          Row(
+            children: [
+              Expanded(
+                child: GestureDetector(
+                  onTap: () => setState(() => _role = 'member'),
+                  child: Container(
+                    padding: EdgeInsets.symmetric(vertical: fs * 0.025),
+                    decoration: BoxDecoration(
+                      color: _role == 'member' ? const Color(0xFF0D59F2).withOpacity(0.15) : const Color(0xFF152028),
+                      borderRadius: BorderRadius.circular(fs * 0.03),
+                      border: Border.all(color: _role == 'member' ? const Color(0xFF0D59F2) : const Color(0xFF455664)),
+                    ),
+                    child: Column(
+                      children: [
+                        Icon(Icons.person_outline, color: _role == 'member' ? const Color(0xFF0D59F2) : const Color(0xFF7D92B1), size: fs * 0.05),
+                        const SizedBox(height: 4),
+                        Text(
+                          'Участник',
+                          style: TextStyle(color: _role == 'member' ? const Color(0xFF0D59F2) : const Color(0xFF7D92B1), fontSize: fs * 0.03, fontWeight: FontWeight.w600),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+              SizedBox(width: fs * 0.025),
+              Expanded(
+                child: GestureDetector(
+                  onTap: () => setState(() => _role = 'admin'),
+                  child: Container(
+                    padding: EdgeInsets.symmetric(vertical: fs * 0.025),
+                    decoration: BoxDecoration(
+                      color: _role == 'admin' ? const Color(0xFFFACC15).withOpacity(0.15) : const Color(0xFF152028),
+                      borderRadius: BorderRadius.circular(fs * 0.03),
+                      border: Border.all(color: _role == 'admin' ? const Color(0xFFFACC15) : const Color(0xFF455664)),
+                    ),
+                    child: Column(
+                      children: [
+                        Icon(Icons.admin_panel_settings_outlined, color: _role == 'admin' ? const Color(0xFFFACC15) : const Color(0xFF7D92B1), size: fs * 0.05),
+                        const SizedBox(height: 4),
+                        Text(
+                          'Админ',
+                          style: TextStyle(color: _role == 'admin' ? const Color(0xFFFACC15) : const Color(0xFF7D92B1), fontSize: fs * 0.03, fontWeight: FontWeight.w600),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: Text(
+            'Отмена',
+            style: TextStyle(color: const Color(0xFF7D92B1), fontSize: fs * 0.036),
+          ),
+        ),
+        TextButton(
+          onPressed: () => Navigator.pop(context, (email: _ctrl.text.trim(), role: _role)),
+          child: Text(
+            'Пригласить',
+            style: TextStyle(color: const Color(0xFF0D59F2), fontSize: fs * 0.036, fontWeight: FontWeight.w600),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ПЕРЕИСПОЛЬЗУЕМЫЙ ДИАЛОГ ВВОДА ТЕКСТА
+// Контроллер живёт в State — не пересоздаётся при rebuild
+// ═══════════════════════════════════════════════════════════════════════════════
+
+class _TextInputDialog extends StatefulWidget {
+  final String title;
+  final String hint;
+  final String confirmLabel;
+  final IconData icon;
+  final TextInputType keyboardType;
+
+  const _TextInputDialog({required this.title, required this.hint, required this.confirmLabel, required this.icon, this.keyboardType = TextInputType.text});
+
+  @override
+  State<_TextInputDialog> createState() => _TextInputDialogState();
+}
+
+class _TextInputDialogState extends State<_TextInputDialog> {
+  late final TextEditingController _ctrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = TextEditingController();
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final fs = MediaQuery.of(context).size.width.clamp(320.0, 430.0);
+    return AlertDialog(
+      backgroundColor: const Color(0xFF10232C),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(fs * 0.04)),
+      title: Text(
+        widget.title,
+        style: TextStyle(color: Colors.white, fontSize: fs * 0.045),
+      ),
+      content: Container(
+        decoration: BoxDecoration(
+          color: const Color(0xFF152028),
+          borderRadius: BorderRadius.circular(fs * 0.03),
+          border: Border.all(color: const Color(0xFF455664)),
+        ),
+        child: TextField(
+          controller: _ctrl,
+          autofocus: true,
+          keyboardType: widget.keyboardType,
+          style: TextStyle(color: Colors.white, fontSize: fs * 0.038),
+          decoration: InputDecoration(
+            hintText: widget.hint,
+            hintStyle: TextStyle(color: const Color(0xFF7D92B1), fontSize: fs * 0.036),
+            prefixIcon: Icon(widget.icon, color: const Color(0xFF7D92B1), size: fs * 0.05),
+            border: InputBorder.none,
+            contentPadding: EdgeInsets.symmetric(horizontal: fs * 0.04, vertical: fs * 0.038),
+          ),
+          onSubmitted: (v) => Navigator.pop(context, v.trim()),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: Text(
+            'Отмена',
+            style: TextStyle(color: const Color(0xFF7D92B1), fontSize: fs * 0.036),
+          ),
+        ),
+        TextButton(
+          onPressed: () => Navigator.pop(context, _ctrl.text.trim()),
+          child: Text(
+            widget.confirmLabel,
+            style: TextStyle(color: const Color(0xFF0D59F2), fontSize: fs * 0.036, fontWeight: FontWeight.w600),
+          ),
+        ),
+      ],
     );
   }
 }

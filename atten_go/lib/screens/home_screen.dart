@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../services/schedule_service.dart';
+import '../services/group_service.dart';
 import '../services/attendance_service.dart';
 import '../services/auth_service.dart';
 import '../services/notification_service.dart';
@@ -9,8 +10,9 @@ import '../utils/dark_page_route.dart';
 class HomeScreen extends StatefulWidget {
   final VoidCallback? onNavigateToSchedule;
   final VoidCallback? onNavigateToStats;
+  final VoidCallback? onRoleChanged;
 
-  const HomeScreen({super.key, this.onNavigateToSchedule, this.onNavigateToStats});
+  const HomeScreen({super.key, this.onNavigateToSchedule, this.onNavigateToStats, this.onRoleChanged});
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
@@ -22,6 +24,7 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _isLoading = true;
   UserProfile? _profile;
   int _unreadCount = 0;
+  List<GroupInvitation> _pendingInvitations = [];
 
   @override
   void initState() {
@@ -38,6 +41,8 @@ class _HomeScreenState extends State<HomeScreen> {
       _profile = profile;
       _unreadCount = unread;
     });
+    final invitations = await GroupService.getMyInvitations();
+    setState(() => _pendingInvitations = invitations);
     await _loadAttendanceStats();
     setState(() => _isLoading = false);
   }
@@ -51,8 +56,11 @@ class _HomeScreenState extends State<HomeScreen> {
       _profile = profile;
       _unreadCount = unread;
     });
+    final invitations = await GroupService.getMyInvitations();
     await _loadAttendanceStats();
-    setState(() {});
+    setState(() {
+      _pendingInvitations = invitations;
+    });
   }
 
   Future<void> _loadAttendanceStats() async {
@@ -80,9 +88,11 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   void _openNotifications() async {
-    await Navigator.push(context, DarkPageRoute(builder: (_) => const NotificationScreen()));
-    // Полностью обновляем — пользователь мог принять приглашение
+    final roleChanged = await Navigator.push<bool>(context, DarkPageRoute(builder: (_) => const NotificationScreen()));
     _refresh();
+    if (roleChanged == true && mounted) {
+      widget.onRoleChanged?.call();
+    }
   }
 
   @override
@@ -167,6 +177,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 padding: EdgeInsets.fromLTRB(hPad, vPad, hPad, h * 0.03),
                 child: Column(
                   children: [
+                    if (_pendingInvitations.isNotEmpty) ...[_buildInvitationBanner(fs, h), SizedBox(height: h * 0.02)],
                     _buildLessonsCard(fs, h, w),
                     SizedBox(height: h * 0.025),
                     _buildScheduleToday(fs, h, w),
@@ -208,6 +219,55 @@ class _HomeScreenState extends State<HomeScreen> {
         child: Text(
           _profile?.initials ?? '?',
           style: TextStyle(color: Colors.white, fontSize: fs * 0.05, fontWeight: FontWeight.bold),
+        ),
+      ),
+    );
+  }
+
+  // ── Баннер приглашений ──
+  Widget _buildInvitationBanner(double fs, double h) {
+    final count = _pendingInvitations.length;
+    return GestureDetector(
+      onTap: _openNotifications,
+      child: Container(
+        padding: EdgeInsets.symmetric(horizontal: fs * 0.045, vertical: fs * 0.035),
+        decoration: BoxDecoration(
+          color: const Color(0xFF0D59F2).withOpacity(0.12),
+          borderRadius: BorderRadius.circular(fs * 0.04),
+          border: Border.all(color: const Color(0xFF0D59F2).withOpacity(0.5), width: 1.5),
+        ),
+        child: Row(
+          children: [
+            Container(
+              padding: EdgeInsets.all(fs * 0.02),
+              decoration: BoxDecoration(color: const Color(0xFF0D59F2).withOpacity(0.2), shape: BoxShape.circle),
+              child: Icon(Icons.group_add_rounded, color: const Color(0xFF0D59F2), size: fs * 0.05),
+            ),
+            SizedBox(width: fs * 0.03),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    count == 1 ? 'Приглашение в группу' : '$count приглашения в группу',
+                    style: TextStyle(color: Colors.white, fontSize: fs * 0.037, fontWeight: FontWeight.w600),
+                  ),
+                  Text(
+                    'Нажмите чтобы посмотреть',
+                    style: TextStyle(color: const Color(0xFF7D92B1), fontSize: fs * 0.029),
+                  ),
+                ],
+              ),
+            ),
+            Container(
+              padding: EdgeInsets.symmetric(horizontal: fs * 0.03, vertical: fs * 0.015),
+              decoration: BoxDecoration(color: const Color(0xFF0D59F2), borderRadius: BorderRadius.circular(fs * 0.04)),
+              child: Text(
+                'Открыть',
+                style: TextStyle(color: Colors.white, fontSize: fs * 0.031, fontWeight: FontWeight.w600),
+              ),
+            ),
+          ],
         ),
       ),
     );

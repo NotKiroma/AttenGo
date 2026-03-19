@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../services/attendance_service.dart';
 import '../services/student_service.dart';
+import '../services/group_service.dart';
 import '../services/schedule_service.dart';
 import 'student_profile_screen.dart';
 import '../utils/dark_page_route.dart';
@@ -20,6 +21,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> with WidgetsBinding
   String? _currentLessonKey;
   bool _isLoading = true;
   bool _isWeekend = false;
+  bool _hasGroup = false;
 
   List<Student> _fullStudents = [];
   List<Lesson> _todaySchedule = [];
@@ -44,13 +46,21 @@ class _AttendanceScreenState extends State<AttendanceScreen> with WidgetsBinding
   }
 
   Future<void> _init() async {
+    GroupService.invalidateCache();
+    final group = await GroupService.getCurrentGroup();
+    _hasGroup = group != null;
+    if (!_hasGroup) {
+      setState(() => _isLoading = false);
+      return;
+    }
     _isWeekend = AttendanceService.isWeekend;
     _fullStudents = await StudentService.loadAll();
     _todaySchedule = await ScheduleService.getTodayLessons();
 
     if (_isWeekend) {
-      final students = await AttendanceService.loadStudentsOnly();
-      _currentLesson = LessonAttendance(date: AttendanceService.todayDate(), lessonKey: 'weekend', subject: 'Выходной', students: students);
+      final freshStudents = await StudentService.loadAll();
+      _fullStudents = freshStudents;
+      _currentLesson = LessonAttendance(date: AttendanceService.todayDate(), lessonKey: 'weekend', subject: 'Выходной', students: freshStudents.map((s) => StudentAttendance.fromStudent(s)).toList());
     } else {
       await _loadCurrentLesson();
     }
@@ -58,12 +68,21 @@ class _AttendanceScreenState extends State<AttendanceScreen> with WidgetsBinding
   }
 
   Future<void> _refresh() async {
+    GroupService.invalidateCache();
+    AttendanceService.invalidateCache();
+    final group = await GroupService.getCurrentGroup();
+    _hasGroup = group != null;
+    if (!_hasGroup) {
+      setState(() {});
+      return;
+    }
     _fullStudents = await StudentService.loadAll();
     _todaySchedule = await ScheduleService.getTodayLessons();
 
     if (_isWeekend) {
-      final students = await AttendanceService.loadStudentsOnly();
-      _currentLesson = LessonAttendance(date: AttendanceService.todayDate(), lessonKey: 'weekend', subject: 'Выходной', students: students);
+      final freshStudents = await StudentService.loadAll();
+      _fullStudents = freshStudents;
+      _currentLesson = LessonAttendance(date: AttendanceService.todayDate(), lessonKey: 'weekend', subject: 'Выходной', students: freshStudents.map((s) => StudentAttendance.fromStudent(s)).toList());
     } else {
       await _loadCurrentLesson();
     }
@@ -84,16 +103,28 @@ class _AttendanceScreenState extends State<AttendanceScreen> with WidgetsBinding
   }
 
   int _parseTime(String t) {
-    final p = t.split(':');
-    return int.parse(p[0]) * 60 + int.parse(p[1]);
+    try {
+      final p = t.split(':');
+      if (p.length >= 2) {
+        return int.parse(p[0]) * 60 + int.parse(p[1]);
+      }
+      // Формат без двоеточия: "0900" -> 09*60+00
+      if (t.length == 4) {
+        return int.parse(t.substring(0, 2)) * 60 + int.parse(t.substring(2, 4));
+      }
+      return 0;
+    } catch (_) {
+      return 0;
+    }
   }
 
   Future<void> _loadCurrentLesson() async {
     final active = _activeLesson;
     if (active == null) {
-      // Нет активного занятия — грузим просто список студентов
-      final students = await AttendanceService.loadStudentsOnly();
-      _currentLesson = LessonAttendance(date: AttendanceService.todayDate(), lessonKey: 'no_lesson', subject: '', students: students);
+      // Нет активного занятия — грузим список студентов (кеш уже сброшен в _refresh)
+      final students = await StudentService.loadAll();
+      _currentLesson = LessonAttendance(date: AttendanceService.todayDate(), lessonKey: 'no_lesson', subject: '', students: students.map((s) => StudentAttendance.fromStudent(s)).toList());
+      _fullStudents = students;
       _currentLessonKey = null;
       return;
     }
@@ -318,7 +349,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> with WidgetsBinding
                         ),
                         child: Row(
                           children: [
-                            CircleAvatar(radius: 18, backgroundImage: AssetImage(s.isMale ? 'assets/images/man_avatar.png' : 'assets/images/women_avatar.png'), backgroundColor: const Color(0xFF3A5FCD)),
+                            _studentAvatar(s, 18),
                             const SizedBox(width: 12),
                             Text(
                               '${s.lastName} ${s.firstName}',
@@ -428,6 +459,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> with WidgetsBinding
                           final student = Student(id: '', lastName: lastCtrl.text.trim(), firstName: firstCtrl.text.trim(), middleName: middleCtrl.text.trim(), isMale: isMale);
                           await StudentService.addStudent(student);
                           Navigator.pop(ctx);
+                          AttendanceService.invalidateCache();
                           await _refresh();
                         },
                         style: ElevatedButton.styleFrom(
@@ -501,6 +533,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> with WidgetsBinding
               onPressed: () async {
                 Navigator.pop(ctx);
                 await StudentService.deleteStudent(student.studentId);
+                AttendanceService.invalidateCache();
                 await _refresh();
               },
               child: Text(
@@ -514,11 +547,63 @@ class _AttendanceScreenState extends State<AttendanceScreen> with WidgetsBinding
     );
   }
 
+  Widget _buildNoGroupScaffold(double w, double h) {
+    final fs = w.clamp(320.0, 430.0);
+    return Scaffold(
+      backgroundColor: const Color(0xFF101C22),
+      appBar: AppBar(
+        elevation: 0,
+        scrolledUnderElevation: 0,
+        title: Text(
+          'Посещаемость',
+          style: TextStyle(color: Colors.white, fontSize: w * 0.06, fontWeight: FontWeight.bold),
+        ),
+        centerTitle: true,
+        backgroundColor: const Color(0xFF101C22),
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(1),
+          child: Container(color: const Color(0xFF455664), height: 1),
+        ),
+      ),
+      body: Center(
+        child: Padding(
+          padding: EdgeInsets.all(fs * 0.06),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Container(
+                padding: EdgeInsets.all(fs * 0.06),
+                decoration: BoxDecoration(color: const Color(0xFF0D59F2).withOpacity(0.1), shape: BoxShape.circle),
+                child: Icon(Icons.group_add_outlined, color: const Color(0xFF0D59F2), size: fs * 0.14),
+              ),
+              SizedBox(height: fs * 0.04),
+              Text(
+                'Создайте группу',
+                style: TextStyle(color: Colors.white, fontSize: fs * 0.052, fontWeight: FontWeight.bold),
+              ),
+              SizedBox(height: fs * 0.02),
+              Text(
+                'Чтобы отмечать посещаемость, сначала создайте группу в разделе «Профиль»',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: const Color(0xFF7D92B1), fontSize: fs * 0.036, height: 1.5),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final double w = MediaQuery.of(context).size.width;
     final double h = MediaQuery.of(context).size.height;
     final sortedIndexes = _sortedIndexes;
+
+    // Если нет группы — показываем заглушку
+    if (!_isLoading && !_hasGroup) {
+      return _buildNoGroupScaffold(w, h);
+    }
 
     return Scaffold(
       backgroundColor: const Color(0xFF101C22),
@@ -763,7 +848,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> with WidgetsBinding
                   children: [
                     Stack(
                       children: [
-                        CircleAvatar(radius: _hasActiveLesson ? w * 0.065 : w * 0.055, backgroundImage: AssetImage(student.isMale ? 'assets/images/man_avatar.png' : 'assets/images/women_avatar.png'), backgroundColor: const Color(0xFF3A5FCD)),
+                        _studentAvatar(student, _hasActiveLesson ? w * 0.065 : w * 0.055),
                         if (hasStatus && _hasActiveLesson)
                           Positioned(
                             bottom: 0,
@@ -821,6 +906,16 @@ class _AttendanceScreenState extends State<AttendanceScreen> with WidgetsBinding
         ),
       ),
     );
+  }
+
+  Widget _studentAvatar(StudentAttendance sa, double radius) {
+    final full = _findFullStudent(sa);
+    final avatarUrl = full?.avatarUrl;
+    if (avatarUrl != null && avatarUrl.isNotEmpty) {
+      return CircleAvatar(radius: radius, backgroundColor: const Color(0xFF3A5FCD), backgroundImage: NetworkImage(avatarUrl));
+    }
+    final asset = (full?.isMale ?? true) ? 'assets/images/man_avatar.png' : 'assets/images/women_avatar.png';
+    return CircleAvatar(radius: radius, backgroundImage: AssetImage(asset), backgroundColor: const Color(0xFF3A5FCD));
   }
 
   Widget _buildStatusOption({required String label, required Color color, required VoidCallback onTap}) {

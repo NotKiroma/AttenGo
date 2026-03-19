@@ -15,8 +15,10 @@ class Student {
   final String birthYear;
   final bool isMale;
   final String status;
+  final String? linkedUserId;
+  final String? avatarUrl;
 
-  Student({required this.id, required this.lastName, required this.firstName, this.middleName = '', this.birthDay = '', this.birthMonth = '', this.birthYear = '', required this.isMale, this.status = 'active'});
+  Student({required this.id, required this.lastName, required this.firstName, this.middleName = '', this.birthDay = '', this.birthMonth = '', this.birthYear = '', required this.isMale, this.status = 'active', this.linkedUserId, this.avatarUrl});
 
   String get avatarAsset => isMale ? 'assets/images/man_avatar.png' : 'assets/images/women_avatar.png';
 
@@ -30,6 +32,8 @@ class Student {
     birthYear: row['birth_year'] as String? ?? '',
     isMale: row['is_male'] as bool? ?? true,
     status: row['status'] as String? ?? 'active',
+    linkedUserId: row['linked_user_id'] as String?,
+    avatarUrl: row['avatar_url'] as String?,
   );
 }
 
@@ -43,7 +47,22 @@ class StudentService {
     if (gid == null) return [];
     try {
       final rows = await _db.from('students').select().eq('group_id', gid).or('status.neq.inactive,status.is.null').order('last_name', ascending: true);
-      return (rows as List).map((r) => Student.fromRow(r)).toList();
+
+      final students = <Student>[];
+      for (final r in rows as List) {
+        final linkedId = r['linked_user_id'] as String?;
+        String? avatarUrl;
+        if (linkedId != null) {
+          try {
+            final pRows = await _db.from('profiles').select('avatar_url').eq('id', linkedId).limit(1);
+            if ((pRows as List).isNotEmpty) {
+              avatarUrl = pRows.first['avatar_url'] as String?;
+            }
+          } catch (_) {}
+        }
+        students.add(Student.fromRow({...r, 'avatar_url': avatarUrl}));
+      }
+      return students;
     } catch (e) {
       developer.log('[StudentService] loadAll error: $e');
       return [];
