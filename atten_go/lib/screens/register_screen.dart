@@ -56,12 +56,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
       _error = null;
     });
 
-    final result = await AuthService.register(
-      email: email,
-      password: password,
-      firstName: firstName,
-      lastName: lastName,
-    );
+    final result = await AuthService.register(email: email, password: password, firstName: firstName, lastName: lastName);
 
     if (mounted) {
       setState(() => _isLoading = false);
@@ -75,12 +70,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
           } else {
             // Регистрация успешна, но вход не удался — возвращаем на логин
             Navigator.pop(context);
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                content: Text('Аккаунт создан. Войдите с вашим email и паролем.'),
-                backgroundColor: Color(0xFF10232C),
-              ),
-            );
+            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Аккаунт создан. Войдите с вашим email и паролем.')));
           }
         }
       } else {
@@ -117,19 +107,12 @@ class _RegisterScreenState extends State<RegisterScreen> {
               // Заголовок
               Text(
                 'Создать аккаунт',
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: fs * 0.065,
-                  fontWeight: FontWeight.bold,
-                ),
+                style: TextStyle(color: Colors.white, fontSize: fs * 0.065, fontWeight: FontWeight.bold),
               ),
               SizedBox(height: h * 0.008),
               Text(
                 'Заполните данные для регистрации',
-                style: TextStyle(
-                  color: const Color(0xFF7D92B1),
-                  fontSize: fs * 0.038,
-                ),
+                style: TextStyle(color: const Color(0xFF7D92B1), fontSize: fs * 0.038),
               ),
 
               SizedBox(height: h * 0.035),
@@ -137,37 +120,21 @@ class _RegisterScreenState extends State<RegisterScreen> {
               // Имя
               _label(fs, 'Имя'),
               SizedBox(height: h * 0.008),
-              _inputField(
-                fs: fs,
-                controller: _firstNameCtrl,
-                hint: 'Введите имя',
-                icon: Icons.person_outline,
-              ),
+              _inputField(fs: fs, controller: _firstNameCtrl, hint: 'Введите имя', icon: Icons.person_outline, textInputAction: TextInputAction.next),
 
               SizedBox(height: h * 0.018),
 
               // Фамилия
               _label(fs, 'Фамилия'),
               SizedBox(height: h * 0.008),
-              _inputField(
-                fs: fs,
-                controller: _lastNameCtrl,
-                hint: 'Введите фамилию',
-                icon: Icons.person_outline,
-              ),
+              _inputField(fs: fs, controller: _lastNameCtrl, hint: 'Введите фамилию', icon: Icons.person_outline, textInputAction: TextInputAction.next),
 
               SizedBox(height: h * 0.018),
 
               // Email
               _label(fs, 'Почта'),
               SizedBox(height: h * 0.008),
-              _inputField(
-                fs: fs,
-                controller: _emailCtrl,
-                hint: 'example@mail.com',
-                icon: Icons.email_outlined,
-                keyboardType: TextInputType.emailAddress,
-              ),
+              _inputField(fs: fs, controller: _emailCtrl, hint: 'example@mail.com', icon: Icons.email_outlined, keyboardType: TextInputType.emailAddress, textInputAction: TextInputAction.next),
 
               SizedBox(height: h * 0.018),
 
@@ -180,12 +147,9 @@ class _RegisterScreenState extends State<RegisterScreen> {
                 hint: 'Минимум 6 символов',
                 icon: Icons.lock_outline,
                 obscure: _obscurePassword,
+                textInputAction: TextInputAction.next,
                 suffixIcon: IconButton(
-                  icon: Icon(
-                    _obscurePassword ? Icons.visibility_off_outlined : Icons.visibility_outlined,
-                    color: const Color(0xFF7D92B1),
-                    size: fs * 0.05,
-                  ),
+                  icon: Icon(_obscurePassword ? Icons.visibility_off_outlined : Icons.visibility_outlined, color: const Color(0xFF7D92B1), size: fs * 0.05),
                   onPressed: () => setState(() => _obscurePassword = !_obscurePassword),
                 ),
               ),
@@ -201,12 +165,10 @@ class _RegisterScreenState extends State<RegisterScreen> {
                 hint: 'Повторите пароль',
                 icon: Icons.lock_outline,
                 obscure: _obscureConfirm,
+                textInputAction: TextInputAction.done,
+                onSubmitted: (_) => _register(),
                 suffixIcon: IconButton(
-                  icon: Icon(
-                    _obscureConfirm ? Icons.visibility_off_outlined : Icons.visibility_outlined,
-                    color: const Color(0xFF7D92B1),
-                    size: fs * 0.05,
-                  ),
+                  icon: Icon(_obscureConfirm ? Icons.visibility_off_outlined : Icons.visibility_outlined, color: const Color(0xFF7D92B1), size: fs * 0.05),
                   onPressed: () => setState(() => _obscureConfirm = !_obscureConfirm),
                 ),
               ),
@@ -218,9 +180,9 @@ class _RegisterScreenState extends State<RegisterScreen> {
                   width: double.infinity,
                   padding: EdgeInsets.all(fs * 0.03),
                   decoration: BoxDecoration(
-                    color: const Color(0xFFF87171).withOpacity(0.1),
+                    color: const Color(0xFFF87171).withValues(alpha: 0.1),
                     borderRadius: BorderRadius.circular(fs * 0.03),
-                    border: Border.all(color: const Color(0xFFF87171).withOpacity(0.3)),
+                    border: Border.all(color: const Color(0xFFF87171).withValues(alpha: 0.3)),
                   ),
                   child: Row(
                     children: [
@@ -247,7 +209,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
                   style: ElevatedButton.styleFrom(
                     backgroundColor: const Color(0xFF0D59F2),
                     foregroundColor: Colors.white,
-                    disabledBackgroundColor: const Color(0xFF0D59F2).withOpacity(0.5),
+                    disabledBackgroundColor: const Color(0xFF0D59F2).withValues(alpha: 0.5),
                     padding: EdgeInsets.symmetric(vertical: h * 0.02),
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(fs * 0.04)),
                     elevation: 0,
@@ -258,7 +220,10 @@ class _RegisterScreenState extends State<RegisterScreen> {
                           height: fs * 0.055,
                           child: const CircularProgressIndicator(color: Colors.white, strokeWidth: 2),
                         )
-                      : Text('Зарегистрироваться', style: TextStyle(fontSize: fs * 0.042, fontWeight: FontWeight.w600)),
+                      : Text(
+                          'Зарегистрироваться',
+                          style: TextStyle(fontSize: fs * 0.042, fontWeight: FontWeight.w600),
+                        ),
                 ),
               ),
 
@@ -300,15 +265,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
     );
   }
 
-  Widget _inputField({
-    required double fs,
-    required TextEditingController controller,
-    required String hint,
-    required IconData icon,
-    bool obscure = false,
-    Widget? suffixIcon,
-    TextInputType? keyboardType,
-  }) {
+  Widget _inputField({required double fs, required TextEditingController controller, required String hint, required IconData icon, bool obscure = false, Widget? suffixIcon, TextInputType? keyboardType, TextInputAction? textInputAction, ValueChanged<String>? onSubmitted}) {
     return Container(
       decoration: BoxDecoration(
         color: const Color(0xFF10232C),
@@ -319,6 +276,8 @@ class _RegisterScreenState extends State<RegisterScreen> {
         controller: controller,
         obscureText: obscure,
         keyboardType: keyboardType,
+        textInputAction: textInputAction,
+        onSubmitted: onSubmitted,
         style: TextStyle(color: Colors.white, fontSize: fs * 0.038),
         decoration: InputDecoration(
           hintText: hint,

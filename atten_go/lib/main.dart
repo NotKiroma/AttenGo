@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
+import 'services/db_service.dart';
 import 'screens/auth_wrapper.dart';
 import 'main_screen.dart';
 
@@ -10,7 +10,8 @@ void main() async {
   // Тёмный статус-бар
   SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(statusBarColor: Color(0xFF101C22), statusBarIconBrightness: Brightness.light, systemNavigationBarColor: Color(0xFF101C22), systemNavigationBarIconBrightness: Brightness.light));
 
-  await Supabase.initialize(url: 'https://hiidpfgcsljombikrhvy.supabase.co', anonKey: 'sb_publishable_U4kAvFaV9UkOkUiL2qtujw__FIT_DKH');
+  // Единственная точка инициализации Supabase
+  await DatabaseService.init();
 
   runApp(const MyApp());
 }
@@ -24,24 +25,26 @@ class MyApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       title: 'AttenGo',
 
-      // ═══ ЭТО УБИРАЕТ БЕЛЫЕ ВСПЫШКИ ═══
+      // ═══ Тёмная тема — убирает белые вспышки ═══
       theme: ThemeData(
-        // Фон всех Scaffold
         scaffoldBackgroundColor: const Color(0xFF101C22),
-        // Фон канваса (между страницами при анимации)
         canvasColor: const Color(0xFF101C22),
-        // Фон карточек и диалогов
         cardColor: const Color(0xFF10232C),
-        // Фон AppBar
         appBarTheme: const AppBarTheme(backgroundColor: Color(0xFF101C22), surfaceTintColor: Colors.transparent),
-        // Тёмная цветовая схема
         colorScheme: const ColorScheme.dark(surface: Color(0xFF101C22), primary: Color(0xFF0D59F2)),
-        // Фон страницы при анимации переходов
+        // SnackBar — контрастный на тёмном фоне
+        snackBarTheme: SnackBarThemeData(
+          backgroundColor: const Color(0xFF1E3A4A),
+          contentTextStyle: const TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w500),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          behavior: SnackBarBehavior.floating,
+          elevation: 8,
+          insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        ),
         pageTransitionsTheme: const PageTransitionsTheme(builders: {TargetPlatform.android: _DarkFadeTransitionBuilder(), TargetPlatform.iOS: CupertinoPageTransitionsBuilder()}),
         useMaterial3: true,
       ),
 
-      // ═══════════════════════════════════
       home: AuthWrapper(mainApp: const MainScreen()),
     );
   }
@@ -54,7 +57,7 @@ class _DarkFadeTransitionBuilder extends PageTransitionsBuilder {
   @override
   Widget buildTransitions<T>(PageRoute<T> route, BuildContext context, Animation<double> animation, Animation<double> secondaryAnimation, Widget child) {
     return Container(
-      color: const Color(0xFF101C22), // тёмный фон под анимацией
+      color: const Color(0xFF101C22),
       child: FadeTransition(
         opacity: CurvedAnimation(parent: animation, curve: Curves.easeOut),
         child: child,

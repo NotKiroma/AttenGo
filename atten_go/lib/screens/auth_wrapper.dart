@@ -35,8 +35,9 @@ class _AuthWrapperState extends State<AuthWrapper> {
   }
 
   void _listenAuthChanges() {
-    AuthService.authStateChanges.listen((data) {
-      final event = (data as AuthState).event;
+    // Стрим теперь типизирован как Stream<AuthState> — каст не нужен
+    AuthService.authStateChanges.listen((authState) {
+      final event = authState.event;
       if (mounted) {
         setState(() {
           _isLoggedIn = AuthService.isLoggedIn;

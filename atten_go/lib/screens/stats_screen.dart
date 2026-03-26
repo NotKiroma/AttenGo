@@ -1,6 +1,8 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import '../services/attendance_service.dart';
 import '../services/group_service.dart';
+import '../services/realtime_service.dart';
 
 class StatsScreen extends StatefulWidget {
   const StatsScreen({super.key});
@@ -30,10 +32,32 @@ class _StatsScreenState extends State<StatsScreen> {
   List<LessonAttendance> _dayLessons = [];
   int? _expandedDayLesson;
 
+  final List<StreamSubscription> _subs = [];
+
   @override
   void initState() {
     super.initState();
     _loadAll();
+
+    // Авто-обновление при изменениях посещаемости
+    _subs.add(
+      RealtimeService.onAttendanceRecordsChanged.listen((_) {
+        if (mounted) _loadAll();
+      }),
+    );
+    _subs.add(
+      RealtimeService.onAttendanceLessonsChanged.listen((_) {
+        if (mounted) _loadAll();
+      }),
+    );
+  }
+
+  @override
+  void dispose() {
+    for (final sub in _subs) {
+      sub.cancel();
+    }
+    super.dispose();
   }
 
   Future<void> _loadAll() async {
@@ -230,7 +254,7 @@ class _StatsScreenState extends State<StatsScreen> {
           children: [
             Container(
               padding: EdgeInsets.all(fs * 0.06),
-              decoration: BoxDecoration(color: const Color(0xFF0D59F2).withOpacity(0.1), shape: BoxShape.circle),
+              decoration: BoxDecoration(color: const Color(0xFF0D59F2).withValues(alpha: 0.1), shape: BoxShape.circle),
               child: Icon(Icons.group_add_outlined, color: const Color(0xFF0D59F2), size: fs * 0.14),
             ),
             SizedBox(height: fs * 0.04),
@@ -374,7 +398,7 @@ class _StatsScreenState extends State<StatsScreen> {
                 Container(
                   padding: EdgeInsets.symmetric(horizontal: fs * 0.025, vertical: 4),
                   margin: const EdgeInsets.only(bottom: 4),
-                  decoration: BoxDecoration(color: changeColor.withOpacity(0.15), borderRadius: BorderRadius.circular(12)),
+                  decoration: BoxDecoration(color: changeColor.withValues(alpha: 0.15), borderRadius: BorderRadius.circular(12)),
                   child: Text(
                     changeText,
                     style: TextStyle(color: changeColor, fontSize: fs * 0.03, fontWeight: FontWeight.w600),
@@ -515,7 +539,7 @@ class _StatsScreenState extends State<StatsScreen> {
             ),
             SizedBox(width: fs * 0.03),
             Expanded(
-              child: _statCard(fs, h, label: 'Уважительных', value: '$excused', badge: '$excusedPct%', badgeColor: const Color(0xFFFACC15)),
+              child: _statCard(fs, h, label: 'Уваж. причина', value: '$excused', badge: '$excusedPct%', badgeColor: const Color(0xFFFACC15)),
             ),
           ],
         ),
@@ -546,7 +570,7 @@ class _StatsScreenState extends State<StatsScreen> {
           SizedBox(height: h * 0.008),
           Container(
             padding: EdgeInsets.symmetric(horizontal: fs * 0.025, vertical: 3),
-            decoration: BoxDecoration(color: badgeColor.withOpacity(0.15), borderRadius: BorderRadius.circular(20)),
+            decoration: BoxDecoration(color: badgeColor.withValues(alpha: 0.15), borderRadius: BorderRadius.circular(20)),
             child: Text(
               badge,
               style: TextStyle(color: badgeColor, fontSize: fs * 0.028, fontWeight: FontWeight.bold),
@@ -611,7 +635,6 @@ class _StatsScreenState extends State<StatsScreen> {
         return Theme(
           data: ThemeData.dark().copyWith(
             colorScheme: const ColorScheme.dark(primary: Color(0xFF0D59F2), onPrimary: Colors.white, surface: Color(0xFF10232C), onSurface: Colors.white),
-            dialogBackgroundColor: const Color(0xFF101C22),
           ),
           child: child!,
         );
@@ -674,7 +697,7 @@ class _StatsScreenState extends State<StatsScreen> {
                   // Процент
                   Container(
                     padding: EdgeInsets.symmetric(horizontal: fs * 0.025, vertical: 4),
-                    decoration: BoxDecoration(color: _pctColor(pct.toDouble()).withOpacity(0.15), borderRadius: BorderRadius.circular(12)),
+                    decoration: BoxDecoration(color: _pctColor(pct.toDouble()).withValues(alpha: 0.15), borderRadius: BorderRadius.circular(12)),
                     child: Text(
                       '$pct%',
                       style: TextStyle(color: _pctColor(pct.toDouble()), fontSize: fs * 0.035, fontWeight: FontWeight.bold),
@@ -737,7 +760,7 @@ class _StatsScreenState extends State<StatsScreen> {
                           ),
                           Container(
                             padding: EdgeInsets.symmetric(horizontal: fs * 0.02, vertical: 3),
-                            decoration: BoxDecoration(color: statusColor.withOpacity(0.15), borderRadius: BorderRadius.circular(10)),
+                            decoration: BoxDecoration(color: statusColor.withValues(alpha: 0.15), borderRadius: BorderRadius.circular(10)),
                             child: Text(
                               statusText,
                               style: TextStyle(color: statusColor, fontSize: fs * 0.026, fontWeight: FontWeight.w600),
@@ -760,7 +783,7 @@ class _StatsScreenState extends State<StatsScreen> {
     return Expanded(
       child: Container(
         padding: EdgeInsets.symmetric(vertical: fs * 0.02),
-        decoration: BoxDecoration(color: color.withOpacity(0.1), borderRadius: BorderRadius.circular(fs * 0.03)),
+        decoration: BoxDecoration(color: color.withValues(alpha: 0.1), borderRadius: BorderRadius.circular(fs * 0.03)),
         child: Column(
           children: [
             Text(
@@ -770,7 +793,7 @@ class _StatsScreenState extends State<StatsScreen> {
             SizedBox(height: 2),
             Text(
               label,
-              style: TextStyle(color: color.withOpacity(0.8), fontSize: fs * 0.026),
+              style: TextStyle(color: color.withValues(alpha: 0.8), fontSize: fs * 0.026),
             ),
           ],
         ),

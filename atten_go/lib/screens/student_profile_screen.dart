@@ -1,6 +1,8 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import '../services/student_service.dart';
 import '../services/attendance_service.dart';
+import '../services/realtime_service.dart';
 import '../utils/dark_page_route.dart';
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -30,11 +32,24 @@ class _StudentProfileScreenState extends State<StudentProfileScreen> {
   // Сворачиваемость
   final Set<String> _expandedSubjects = {};
 
+  StreamSubscription? _attendanceSub;
+
   @override
   void initState() {
     super.initState();
     _student = widget.student;
     _loadStats();
+
+    // Авто-обновление при изменении посещаемости
+    _attendanceSub = RealtimeService.onAttendanceRecordsChanged.listen((_) {
+      if (mounted) _loadStats();
+    });
+  }
+
+  @override
+  void dispose() {
+    _attendanceSub?.cancel();
+    super.dispose();
   }
 
   Future<void> _loadStats() async {
@@ -213,7 +228,7 @@ class _StudentProfileScreenState extends State<StudentProfileScreen> {
                   ? Image.network(
                       avatarUrl,
                       fit: BoxFit.cover,
-                      errorBuilder: (_, __, ___) => Image.asset(_student.avatarAsset, fit: BoxFit.cover),
+                      errorBuilder: (_, _, _) => Image.asset(_student.avatarAsset, fit: BoxFit.cover),
                     )
                   : Image.asset(_student.avatarAsset, fit: BoxFit.cover),
             ),
@@ -267,7 +282,7 @@ class _StudentProfileScreenState extends State<StudentProfileScreen> {
             ),
             SizedBox(width: fs * 0.03),
             Expanded(
-              child: _statCard(fs, h, label: 'Уважительных', value: '$_excused', badge: '$excusedPct%', badgeColor: const Color(0xFFFACC15)),
+              child: _statCard(fs, h, label: 'Уваж. причина', value: '$_excused', badge: '$excusedPct%', badgeColor: const Color(0xFFFACC15)),
             ),
           ],
         ),
@@ -298,7 +313,7 @@ class _StudentProfileScreenState extends State<StudentProfileScreen> {
           SizedBox(height: h * 0.008),
           Container(
             padding: EdgeInsets.symmetric(horizontal: fs * 0.025, vertical: 3),
-            decoration: BoxDecoration(color: badgeColor.withOpacity(0.15), borderRadius: BorderRadius.circular(fs * 0.04)),
+            decoration: BoxDecoration(color: badgeColor.withValues(alpha: 0.15), borderRadius: BorderRadius.circular(fs * 0.04)),
             child: Text(
               badge,
               style: TextStyle(color: badgeColor, fontSize: fs * 0.028, fontWeight: FontWeight.bold),
@@ -351,9 +366,9 @@ class _StudentProfileScreenState extends State<StudentProfileScreen> {
                 Container(
                   padding: EdgeInsets.symmetric(horizontal: fs * 0.025, vertical: 4),
                   decoration: BoxDecoration(
-                    color: color.withOpacity(0.15),
+                    color: color.withValues(alpha: 0.15),
                     borderRadius: BorderRadius.circular(fs * 0.04),
-                    border: Border.all(color: color.withOpacity(0.5)),
+                    border: Border.all(color: color.withValues(alpha: 0.5)),
                   ),
                   child: Text(
                     grade,
@@ -378,7 +393,7 @@ class _StudentProfileScreenState extends State<StudentProfileScreen> {
             // Развернутая часть
             if (isExpanded) ...[
               SizedBox(height: h * 0.012),
-              Container(height: 1, color: const Color(0xFF455664).withOpacity(0.5)),
+              Container(height: 1, color: const Color(0xFF455664).withValues(alpha: 0.5)),
               SizedBox(height: h * 0.012),
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -419,7 +434,7 @@ class _StudentProfileScreenState extends State<StudentProfileScreen> {
                   SizedBox(width: fs * 0.02),
                   _detailChip(fs, 'Пропуски', '${stats['absent']}', const Color(0xFFF87171)),
                   SizedBox(width: fs * 0.02),
-                  _detailChip(fs, 'Причина', '${stats['late']}', const Color(0xFFFACC15)),
+                  _detailChip(fs, 'Уваж. причина', '${stats['late']}', const Color(0xFFFACC15)),
                 ],
               ),
             ],
@@ -433,7 +448,7 @@ class _StudentProfileScreenState extends State<StudentProfileScreen> {
     return Expanded(
       child: Container(
         padding: EdgeInsets.symmetric(vertical: fs * 0.02),
-        decoration: BoxDecoration(color: color.withOpacity(0.08), borderRadius: BorderRadius.circular(fs * 0.04)),
+        decoration: BoxDecoration(color: color.withValues(alpha: 0.08), borderRadius: BorderRadius.circular(fs * 0.04)),
         child: Column(
           children: [
             Text(
@@ -442,7 +457,7 @@ class _StudentProfileScreenState extends State<StudentProfileScreen> {
             ),
             Text(
               label,
-              style: TextStyle(color: color.withOpacity(0.7), fontSize: fs * 0.025),
+              style: TextStyle(color: color.withValues(alpha: 0.7), fontSize: fs * 0.025),
             ),
           ],
         ),
@@ -488,7 +503,9 @@ class _StudentEditScreenState extends State<StudentEditScreen> {
 
   @override
   void dispose() {
-    for (final c in [_lastNameCtrl, _firstNameCtrl, _middleNameCtrl, _dayCtrl, _monthCtrl, _yearCtrl]) c.dispose();
+    for (final c in [_lastNameCtrl, _firstNameCtrl, _middleNameCtrl, _dayCtrl, _monthCtrl, _yearCtrl]) {
+      c.dispose();
+    }
     super.dispose();
   }
 
@@ -557,7 +574,7 @@ class _StudentEditScreenState extends State<StudentEditScreen> {
                           ? Image.network(
                               widget.student.avatarUrl!,
                               fit: BoxFit.cover,
-                              errorBuilder: (_, __, ___) => Image.asset(avatar, fit: BoxFit.cover),
+                              errorBuilder: (_, _, _) => Image.asset(avatar, fit: BoxFit.cover),
                             )
                           : Image.asset(avatar, fit: BoxFit.cover),
                     ),

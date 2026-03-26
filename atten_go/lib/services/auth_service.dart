@@ -41,7 +41,9 @@ class AuthService {
 
   static String? get currentUserId => _db.auth.currentUser?.id;
   static bool get isLoggedIn => _db.auth.currentUser != null;
-  static Stream get authStateChanges => _db.auth.onAuthStateChange;
+
+  /// Типизированный стрим — убирает необходимость каста в auth_wrapper
+  static Stream<AuthState> get authStateChanges => _db.auth.onAuthStateChange;
 
   // ══════════════════════════════════════════════════════════════════════════
   // Регистрация
@@ -142,21 +144,24 @@ class AuthService {
   // Аватарка
   // ══════════════════════════════════════════════════════════════════════════
 
-  static Future<({bool success, String? error, String? url})> uploadAvatar(Uint8List bytes, String ext) async {
+  /// Загружает аватарку — всегда конвертирует в PNG.
+  static Future<({bool success, String? error, String? url})> uploadAvatar(Uint8List bytes) async {
     final uid = currentUserId;
     if (uid == null) return (success: false, error: 'Не авторизован', url: null);
     try {
-      final path = '$uid/avatar.$ext';
-      final contentType = ext == 'png' ? 'image/png' : 'image/jpeg';
+      const path = 'avatar.png';
+      final storagePath = '$uid/$path';
+      const contentType = 'image/png';
 
-      // Сначала пробуем update, если файл есть — иначе upload
+      // Удаляем старые файлы (все возможные расширения)
       try {
-        await _db.storage.from('avatars').updateBinary(path, bytes, fileOptions: FileOptions(contentType: contentType));
-      } catch (_) {
-        await _db.storage.from('avatars').uploadBinary(path, bytes, fileOptions: FileOptions(contentType: contentType));
-      }
+        await _db.storage.from('avatars').remove(['$uid/avatar.png', '$uid/avatar.jpg', '$uid/avatar.jpeg', '$uid/avatar.webp']);
+      } catch (_) {}
 
-      final url = _db.storage.from('avatars').getPublicUrl(path);
+      // Загружаем новый
+      await _db.storage.from('avatars').uploadBinary(storagePath, bytes, fileOptions: const FileOptions(contentType: contentType, upsert: true));
+
+      final url = _db.storage.from('avatars').getPublicUrl(storagePath);
       final urlWithCache = '$url?t=${DateTime.now().millisecondsSinceEpoch}';
       await _db.from('profiles').update({'avatar_url': urlWithCache}).eq('id', uid);
       return (success: true, error: null, url: urlWithCache);

@@ -52,7 +52,8 @@ class LessonAttendance {
 
   String get percentage {
     if (markedCount == 0) return '—';
-    return '${((presentCount / totalCount) * 100).round()}%';
+    // Процент считается от отмеченных студентов, а не от всех
+    return '${((presentCount / markedCount) * 100).round()}%';
   }
 }
 

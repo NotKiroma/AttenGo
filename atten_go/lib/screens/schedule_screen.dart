@@ -1,17 +1,21 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import '../services/schedule_service.dart';
+import '../services/announcement_service.dart';
+import '../services/attendance_service.dart';
+import '../services/realtime_service.dart';
 
-class SheduleScreen extends StatefulWidget {
+class ScheduleScreen extends StatefulWidget {
   final bool canEdit; // может ли добавлять/редактировать пары
   final bool hasGroup; // состоит ли в группе (своей или чужой)
 
-  const SheduleScreen({super.key, this.canEdit = true, this.hasGroup = true});
+  const ScheduleScreen({super.key, this.canEdit = true, this.hasGroup = true});
 
   @override
-  State<SheduleScreen> createState() => _SheduleScreenState();
+  State<ScheduleScreen> createState() => _ScheduleScreenState();
 }
 
-class _SheduleScreenState extends State<SheduleScreen> {
+class _ScheduleScreenState extends State<ScheduleScreen> {
   int _activeIndex = 0;
   bool _isLoading = true;
 
@@ -20,11 +24,24 @@ class _SheduleScreenState extends State<SheduleScreen> {
 
   static const _weekNames = ['ПН', 'ВТ', 'СР', 'ЧТ', 'ПТ'];
 
+  StreamSubscription? _scheduleSub;
+
   @override
   void initState() {
     super.initState();
     _activeIndex = _todayIndex;
     _loadSchedule();
+
+    // Авто-обновление при изменении расписания в БД
+    _scheduleSub = RealtimeService.onScheduleChanged.listen((_) {
+      if (mounted) _refresh();
+    });
+  }
+
+  @override
+  void dispose() {
+    _scheduleSub?.cancel();
+    super.dispose();
   }
 
   int get _todayIndex {
@@ -69,8 +86,6 @@ class _SheduleScreenState extends State<SheduleScreen> {
   }
 
   static const _monthsShort = ['', 'янв', 'фев', 'мар', 'апр', 'май', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
-
-  String _formatDate(DateTime d) => '${d.day.toString().padLeft(2, '0')} ${_monthsShort[d.month]}';
 
   // ── Добавить занятие ──
   void _addLesson() {
@@ -157,27 +172,6 @@ class _SheduleScreenState extends State<SheduleScreen> {
     );
   }
 
-  Widget _editorField(double fs, TextEditingController ctrl, String hint, IconData icon) {
-    return Container(
-      decoration: BoxDecoration(
-        color: const Color(0xFF10232C),
-        borderRadius: BorderRadius.circular(fs * 0.04),
-        border: Border.all(color: const Color(0xFF455664), width: 1),
-      ),
-      child: TextField(
-        controller: ctrl,
-        style: TextStyle(color: Colors.white, fontSize: fs * 0.037),
-        decoration: InputDecoration(
-          hintText: hint,
-          hintStyle: TextStyle(color: const Color(0xFF7D92B1), fontSize: fs * 0.035),
-          prefixIcon: Icon(icon, color: const Color(0xFF7D92B1), size: fs * 0.05),
-          border: InputBorder.none,
-          contentPadding: EdgeInsets.symmetric(horizontal: fs * 0.04, vertical: fs * 0.035),
-        ),
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     final double w = MediaQuery.of(context).size.width;
@@ -209,6 +203,7 @@ class _SheduleScreenState extends State<SheduleScreen> {
       ),
       floatingActionButton: widget.canEdit
           ? FloatingActionButton(
+              heroTag: 'fab_schedule',
               onPressed: _addLesson,
               backgroundColor: const Color(0xFF0D59F2),
               child: const Icon(Icons.add, color: Colors.white),
@@ -222,9 +217,36 @@ class _SheduleScreenState extends State<SheduleScreen> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   _weekRow(fs, h, w),
-                  Text(
-                    'ЗАНЯТИЯ',
-                    style: TextStyle(color: const Color(0xFF7D92B1), fontSize: fs * 0.031, fontWeight: FontWeight.w600, letterSpacing: 1.2),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text(
+                        'ЗАНЯТИЯ',
+                        style: TextStyle(color: const Color(0xFF7D92B1), fontSize: fs * 0.031, fontWeight: FontWeight.w600, letterSpacing: 1.2),
+                      ),
+                      if (widget.canEdit)
+                        GestureDetector(
+                          onTap: _cancelDay,
+                          child: Container(
+                            padding: EdgeInsets.symmetric(horizontal: fs * 0.032, vertical: fs * 0.018),
+                            decoration: BoxDecoration(
+                              gradient: LinearGradient(colors: [const Color(0xFFF87171).withValues(alpha: 0.15), const Color(0xFFFACC15).withValues(alpha: 0.12)]),
+                              borderRadius: BorderRadius.circular(fs * 0.035),
+                              border: Border.all(color: const Color(0xFFF87171).withValues(alpha: 0.5)),
+                            ),
+                            child: Row(
+                              children: [
+                                Icon(Icons.event_busy_rounded, color: const Color(0xFFF87171), size: fs * 0.04),
+                                SizedBox(width: fs * 0.015),
+                                Text(
+                                  'Отменить день',
+                                  style: TextStyle(color: const Color(0xFFF87171), fontSize: fs * 0.029, fontWeight: FontWeight.w700, letterSpacing: 0.2),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                    ],
                   ),
                   SizedBox(height: h * 0.015),
                   _lessonsList(fs, h, w),
@@ -232,6 +254,259 @@ class _SheduleScreenState extends State<SheduleScreen> {
               ),
             ),
     );
+  }
+
+  Future<void> _showLessonActions(Lesson lesson, int index) async {
+    final fs = MediaQuery.of(context).size.width.clamp(320.0, 430.0);
+    final date = AttendanceService.todayDate();
+    final lessonKey = AttendanceService.lessonKey(lesson.timeStart, lesson.timeEnd);
+    // Проверяем отменена ли уже эта пара или весь день
+    final alreadyCancelled = await AnnouncementService.isCancelled(date: date, lessonKey: lessonKey);
+    final dayAlreadyCancelled = await AnnouncementService.isCancelled(date: date, lessonKey: 'all');
+    final canCancel = !alreadyCancelled && !dayAlreadyCancelled;
+    if (!mounted) return;
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => Container(
+        decoration: const BoxDecoration(
+          color: Color(0xFF152028),
+          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+        ),
+        padding: EdgeInsets.fromLTRB(fs * 0.05, fs * 0.035, fs * 0.05, fs * 0.06),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // Handle
+            Center(
+              child: Container(
+                width: fs * 0.1,
+                height: 4,
+                margin: EdgeInsets.only(bottom: fs * 0.035),
+                decoration: BoxDecoration(color: const Color(0xFF455664), borderRadius: BorderRadius.circular(2)),
+              ),
+            ),
+
+            // Заголовок пары
+            Container(
+              padding: EdgeInsets.all(fs * 0.04),
+              decoration: BoxDecoration(
+                color: const Color(0xFF10232C),
+                borderRadius: BorderRadius.circular(fs * 0.04),
+                border: Border.all(color: const Color(0xFF455664)),
+              ),
+              child: Row(
+                children: [
+                  Container(
+                    width: fs * 0.11,
+                    height: fs * 0.11,
+                    decoration: BoxDecoration(color: const Color(0xFF0D59F2).withValues(alpha: 0.12), borderRadius: BorderRadius.circular(fs * 0.035)),
+                    child: Icon(Icons.book_outlined, color: const Color(0xFF0D59F2), size: fs * 0.05),
+                  ),
+                  SizedBox(width: fs * 0.035),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          lesson.subject,
+                          style: TextStyle(color: Colors.white, fontSize: fs * 0.04, fontWeight: FontWeight.bold),
+                        ),
+                        SizedBox(height: 3),
+                        Row(
+                          children: [
+                            Icon(Icons.access_time_rounded, color: const Color(0xFF7D92B1), size: fs * 0.035),
+                            SizedBox(width: 4),
+                            Text(
+                              '${lesson.timeStart} – ${lesson.timeEnd}',
+                              style: TextStyle(color: const Color(0xFF7D92B1), fontSize: fs * 0.031),
+                            ),
+                            if (lesson.room.isNotEmpty) ...[
+                              SizedBox(width: fs * 0.02),
+                              Icon(Icons.location_on_outlined, color: const Color(0xFF7D92B1), size: fs * 0.035),
+                              SizedBox(width: 2),
+                              Text(
+                                lesson.room,
+                                style: TextStyle(color: const Color(0xFF7D92B1), fontSize: fs * 0.031),
+                              ),
+                            ],
+                          ],
+                        ),
+                        if (alreadyCancelled || dayAlreadyCancelled) ...[
+                          SizedBox(height: 6),
+                          Container(
+                            padding: EdgeInsets.symmetric(horizontal: fs * 0.025, vertical: 3),
+                            decoration: BoxDecoration(color: const Color(0xFFF87171).withValues(alpha: 0.12), borderRadius: BorderRadius.circular(fs * 0.02)),
+                            child: Text(
+                              dayAlreadyCancelled ? 'День уже отменён' : 'Пара уже отменена',
+                              style: TextStyle(color: const Color(0xFFF87171), fontSize: fs * 0.026, fontWeight: FontWeight.w600),
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            SizedBox(height: fs * 0.03),
+
+            // Редактировать
+            _lessonActionTile(
+              ctx,
+              fs,
+              icon: Icons.edit_outlined,
+              label: 'Редактировать',
+              iconBg: const Color(0xFF0D59F2),
+              textColor: Colors.white,
+              onTap: () {
+                Navigator.pop(ctx);
+                _editLesson(index);
+              },
+            ),
+            SizedBox(height: fs * 0.015),
+
+            // Отменить пару (только если не отменена)
+            _lessonActionTile(
+              ctx,
+              fs,
+              icon: Icons.do_not_disturb_on_outlined,
+              label: 'Отменить пару',
+              sub: canCancel ? 'Участники получат уведомление' : (dayAlreadyCancelled ? 'День уже отменён' : 'Пара уже отменена'),
+              iconBg: const Color(0xFFF87171),
+              textColor: canCancel ? Colors.white : const Color(0xFF455664),
+              disabled: !canCancel,
+              onTap: canCancel
+                  ? () {
+                      Navigator.pop(ctx);
+                      _cancelLesson(lesson);
+                    }
+                  : () {},
+            ),
+            SizedBox(height: fs * 0.015),
+
+            // Удалить
+            _lessonActionTile(
+              ctx,
+              fs,
+              icon: Icons.delete_outline_rounded,
+              label: 'Удалить из расписания',
+              iconBg: const Color(0xFF455664),
+              textColor: const Color(0xFF7D92B1),
+              onTap: () {
+                Navigator.pop(ctx);
+                _deleteLesson(index);
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _lessonActionTile(BuildContext ctx, double fs, {required IconData icon, required String label, String? sub, required Color iconBg, required Color textColor, bool disabled = false, required VoidCallback onTap}) {
+    return GestureDetector(
+      onTap: disabled ? null : onTap,
+      child: Container(
+        padding: EdgeInsets.symmetric(horizontal: fs * 0.04, vertical: fs * 0.03),
+        decoration: BoxDecoration(
+          color: disabled ? const Color(0xFF0A1A22) : const Color(0xFF10232C),
+          borderRadius: BorderRadius.circular(fs * 0.04),
+          border: Border.all(color: disabled ? const Color(0xFF2A3A44) : const Color(0xFF455664)),
+        ),
+        child: Row(
+          children: [
+            Container(
+              padding: EdgeInsets.all(fs * 0.022),
+              decoration: BoxDecoration(color: (disabled ? const Color(0xFF455664) : iconBg).withValues(alpha: 0.15), borderRadius: BorderRadius.circular(fs * 0.03)),
+              child: Icon(icon, color: disabled ? const Color(0xFF455664) : iconBg, size: fs * 0.045),
+            ),
+            SizedBox(width: fs * 0.03),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    label,
+                    style: TextStyle(color: disabled ? const Color(0xFF455664) : textColor, fontSize: fs * 0.036, fontWeight: FontWeight.w600),
+                  ),
+                  if (sub != null) ...[
+                    SizedBox(height: 2),
+                    Text(
+                      sub,
+                      style: TextStyle(color: disabled ? const Color(0xFF2A3A44) : const Color(0xFF7D92B1), fontSize: fs * 0.028),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            if (!disabled) Icon(Icons.chevron_right_rounded, color: const Color(0xFF455664), size: fs * 0.045),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _cancelLesson(Lesson lesson) async {
+    final date = AttendanceService.todayDate();
+    final lessonKey = AttendanceService.lessonKey(lesson.timeStart, lesson.timeEnd);
+    final res = await AnnouncementService.create(title: '«${lesson.subject}» отменена', body: '${lesson.timeStart}–${lesson.timeEnd} пара не состоится', isCancel: true, cancelDate: date, cancelKey: lessonKey);
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(res.success ? 'Пара отменена, участники уведомлены' : (res.error ?? 'Ошибка'))));
+    }
+  }
+
+  Future<void> _cancelDay() async {
+    final fs = MediaQuery.of(context).size.width.clamp(320.0, 430.0);
+    final date = AttendanceService.todayDate();
+
+    // Проверяем уже отменён ли день
+    final alreadyCancelled = await AnnouncementService.isCancelled(date: date, lessonKey: 'all');
+    if (!mounted) return;
+
+    if (alreadyCancelled) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('День уже отменён')));
+      return;
+    }
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF10232C),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(fs * 0.04)),
+        title: Text(
+          'Отменить весь день?',
+          style: TextStyle(color: Colors.white, fontSize: fs * 0.045),
+        ),
+        content: Text(
+          'Все пары сегодня будут отменены и не будут учитываться в посещаемости.',
+          style: TextStyle(color: const Color(0xFF7D92B1), fontSize: fs * 0.035),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: Text(
+              'Отмена',
+              style: TextStyle(color: const Color(0xFF7D92B1), fontSize: fs * 0.036),
+            ),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text(
+              'Отменить день',
+              style: TextStyle(color: const Color(0xFFF87171), fontSize: fs * 0.036, fontWeight: FontWeight.w700),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    final res = await AnnouncementService.create(title: 'Все пары отменены', body: 'Сегодня занятий нет', isCancel: true, cancelDate: date, cancelKey: 'all');
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(res.success ? 'День отменён, участники уведомлены' : (res.error ?? 'Ошибка'))));
+    }
   }
 
   Widget _buildNoGroupPlaceholder(double fs, double h) {
@@ -243,7 +518,7 @@ class _SheduleScreenState extends State<SheduleScreen> {
           children: [
             Container(
               padding: EdgeInsets.all(fs * 0.06),
-              decoration: BoxDecoration(color: const Color(0xFF0D59F2).withOpacity(0.1), shape: BoxShape.circle),
+              decoration: BoxDecoration(color: const Color(0xFF0D59F2).withValues(alpha: 0.1), shape: BoxShape.circle),
               child: Icon(Icons.group_add_outlined, color: const Color(0xFF0D59F2), size: fs * 0.14),
             ),
             SizedBox(height: fs * 0.04),
@@ -355,8 +630,8 @@ class _SheduleScreenState extends State<SheduleScreen> {
 
   Widget _buildLessonCard(double fs, double h, double w, Lesson lesson, int index) {
     return GestureDetector(
-      onTap: widget.canEdit ? () => _editLesson(index) : null,
-      onLongPress: widget.canEdit ? () => _deleteLesson(index) : null,
+      onTap: () => widget.canEdit ? _showLessonActions(lesson, index) : null,
+      onLongPress: null,
       child: Container(
         margin: EdgeInsets.only(bottom: h * 0.015),
         padding: EdgeInsets.all(fs * 0.04),
@@ -380,7 +655,7 @@ class _SheduleScreenState extends State<SheduleScreen> {
                     child: Container(
                       margin: EdgeInsets.symmetric(vertical: fs * 0.01, horizontal: 2),
                       width: 1.5,
-                      color: const Color(0xFF455664).withOpacity(0.5),
+                      color: const Color(0xFF455664).withValues(alpha: 0.5),
                     ),
                   ),
                   Text(
@@ -432,8 +707,8 @@ class _SheduleScreenState extends State<SheduleScreen> {
                   ],
                 ),
               ),
-              // Кнопка редактирования
-              Icon(Icons.edit_outlined, color: const Color(0xFF455664), size: fs * 0.045),
+              // Стрелка для входа в шторку (только для canEdit)
+              if (widget.canEdit) Icon(Icons.chevron_right_rounded, color: const Color(0xFF455664), size: fs * 0.055),
             ],
           ),
         ),
@@ -494,7 +769,7 @@ class _SheduleScreenState extends State<SheduleScreen> {
           SizedBox(height: h * 0.003),
           Text(
             _monthsShort[date.month],
-            style: TextStyle(color: isActive ? Colors.white.withOpacity(0.75) : const Color(0xFF7D92B1), fontSize: fs * 0.026, fontWeight: FontWeight.w400),
+            style: TextStyle(color: isActive ? Colors.white.withValues(alpha: 0.75) : const Color(0xFF7D92B1), fontSize: fs * 0.026, fontWeight: FontWeight.w400),
           ),
         ],
       ),
@@ -556,7 +831,6 @@ class _LessonEditorSheetState extends State<_LessonEditorSheet> {
       builder: (ctx, child) => Theme(
         data: Theme.of(ctx).copyWith(
           colorScheme: const ColorScheme.dark(primary: Color(0xFF0D59F2), onPrimary: Colors.white, surface: Color(0xFF10232C), onSurface: Colors.white),
-          dialogBackgroundColor: const Color(0xFF152028),
           timePickerTheme: const TimePickerThemeData(
             backgroundColor: Color(0xFF152028),
             hourMinuteColor: Color(0xFF10232C),
@@ -574,10 +848,11 @@ class _LessonEditorSheetState extends State<_LessonEditorSheet> {
     );
     if (picked != null) {
       setState(() {
-        if (isStart)
+        if (isStart) {
           _timeStart = picked;
-        else
+        } else {
           _timeEnd = picked;
+        }
         _error = null;
       });
     }
@@ -656,9 +931,9 @@ class _LessonEditorSheetState extends State<_LessonEditorSheet> {
               Container(
                 padding: EdgeInsets.all(fs * 0.03),
                 decoration: BoxDecoration(
-                  color: const Color(0xFFF87171).withOpacity(0.1),
+                  color: const Color(0xFFF87171).withValues(alpha: 0.1),
                   borderRadius: BorderRadius.circular(fs * 0.03),
-                  border: Border.all(color: const Color(0xFFF87171).withOpacity(0.4)),
+                  border: Border.all(color: const Color(0xFFF87171).withValues(alpha: 0.4)),
                 ),
                 child: Row(
                   children: [

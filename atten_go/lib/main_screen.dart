@@ -1,21 +1,14 @@
+import 'dart:async';
+import 'dart:developer' as developer;
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'screens/home_screen.dart';
-import 'screens/shedule_screen.dart';
+import 'screens/schedule_screen.dart';
 import 'screens/attendance_screen.dart';
 import 'screens/stats_screen.dart';
 import 'screens/profile_screen.dart';
 import 'services/group_service.dart';
-
-ThemeData appDarkTheme() {
-  return ThemeData(
-    scaffoldBackgroundColor: const Color(0xFF101C22),
-    canvasColor: const Color(0xFF101C22),
-    colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF0D59F2), brightness: Brightness.dark),
-    useMaterial3: true,
-    pageTransitionsTheme: const PageTransitionsTheme(builders: {TargetPlatform.android: FadeUpwardsPageTransitionsBuilder(), TargetPlatform.iOS: CupertinoPageTransitionsBuilder()}),
-  );
-}
+import 'services/realtime_service.dart';
 
 class MainScreen extends StatefulWidget {
   const MainScreen({super.key});
@@ -23,12 +16,15 @@ class MainScreen extends StatefulWidget {
   State<MainScreen> createState() => _MainScreenState();
 }
 
-class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateMixin {
+class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   int _currentIndex = 0;
   bool _canManage = false;
   bool _hasGroup = false;
   bool _roleLoaded = false;
-  int _screenKey = 0; // инкрементируется при смене роли — пересоздаёт все экраны
+  int _screenKey = 0;
+
+  StreamSubscription? _groupMembersSub;
+  StreamSubscription? _groupsSub;
 
   late final AnimationController _animController = AnimationController(vsync: this, duration: const Duration(milliseconds: 250))..value = 1.0;
   late Animation<double> _fadeAnimation = _buildFade();
@@ -37,20 +33,37 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+
+    // Инициализируем Realtime один раз для всего приложения
+    RealtimeService.init();
+
     _loadRole();
+
+    // Слушаем изменения в group_members и groups
+    _groupMembersSub = RealtimeService.onGroupMembersChanged.listen((_) {
+      developer.log('[MainScreen] group_members changed → reload role');
+      _loadRole();
+    });
+    _groupsSub = RealtimeService.onGroupsChanged.listen((_) {
+      developer.log('[MainScreen] groups changed → reload role');
+      _loadRole();
+    });
   }
 
+  // ── Загрузка роли ──────────────────────────────────────
   Future<void> _loadRole() async {
     GroupService.invalidateCache();
     final can = await GroupService.canManage();
     final group = await GroupService.getCurrentGroup();
-    if (mounted)
+    if (mounted) {
       setState(() {
         _canManage = can;
         _hasGroup = group != null;
         _roleLoaded = true;
-        _screenKey++; // пересоздаём экраны при каждой смене роли
+        _screenKey++;
       });
+    }
   }
 
   void refreshRole() => _loadRole();
@@ -60,21 +73,29 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _groupMembersSub?.cancel();
+    _groupsSub?.cancel();
+    RealtimeService.dispose();
     _animController.dispose();
     super.dispose();
   }
 
-  // Три состояния:
-  // 1. !hasGroup (нет группы) → все 5 вкладок, посещаемость/отчёты показывают заглушку
-  // 2. hasGroup && !canManage (member в чужой группе) → 3 вкладки (без посещаемости и отчётов)
-  // 3. canManage (owner/admin) → все 5 вкладок, всё разрешено
-  List<Widget> get _screens {
-    // member в чужой группе — скрываем посещаемость и отчёты
-    if (_hasGroup && !_canManage) {
-      return [HomeScreen(onNavigateToSchedule: () => _goToTab(1), onNavigateToStats: null, onRoleChanged: refreshRole), SheduleScreen(canEdit: false, hasGroup: true), ProfileScreen(onRoleChanged: refreshRole)];
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      // При возврате в приложение переподписываемся
+      RealtimeService.reconnect();
+      GroupService.invalidateCache();
+      _loadRole();
     }
-    // owner/admin или нет группы — все 5 вкладок
-    return [HomeScreen(onNavigateToSchedule: () => _goToTab(1), onNavigateToStats: () => _goToTab(3), onRoleChanged: refreshRole), SheduleScreen(canEdit: _canManage, hasGroup: _hasGroup), const AttendanceScreen(), const StatsScreen(), ProfileScreen(onRoleChanged: refreshRole)];
+  }
+
+  List<Widget> get _screens {
+    if (_hasGroup && !_canManage) {
+      return [HomeScreen(onNavigateToSchedule: () => _goToTab(1), onNavigateToStats: null, onRoleChanged: refreshRole), ScheduleScreen(canEdit: false, hasGroup: true), ProfileScreen(onRoleChanged: refreshRole)];
+    }
+    return [HomeScreen(onNavigateToSchedule: () => _goToTab(1), onNavigateToStats: () => _goToTab(3), onRoleChanged: refreshRole), ScheduleScreen(canEdit: _canManage, hasGroup: _hasGroup), const AttendanceScreen(), const StatsScreen(), ProfileScreen(onRoleChanged: refreshRole)];
   }
 
   List<String> get _icons => (_hasGroup && !_canManage)
@@ -91,11 +112,12 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
 
   @override
   Widget build(BuildContext context) {
-    if (!_roleLoaded)
+    if (!_roleLoaded) {
       return const Scaffold(
         backgroundColor: Color(0xFF101C22),
         body: Center(child: CircularProgressIndicator(color: Color(0xFF0D59F2))),
       );
+    }
     final safe = _currentIndex.clamp(0, _screens.length - 1);
     final double iconSize = MediaQuery.of(context).size.width * 0.09;
     return Scaffold(

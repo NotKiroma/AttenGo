@@ -82,14 +82,23 @@ class GroupService {
     if (_cachedGroup != null) return _cachedGroup;
     if (_uid == null) return null;
     try {
+      // Проверяем что пользователь всё ещё в group_members (мог быть удалён)
       final ms = await _db.from('group_members').select().eq('user_id', _uid!);
-      if ((ms as List).isEmpty) return null;
+      if ((ms as List).isEmpty) {
+        _cachedGroup = null;
+        _cachedMembership = null;
+        return null;
+      }
       final gid = ms.first['group_id'] as String;
+      // Проверяем что группа всё ещё существует
       final gRows = await _db.from('groups').select().eq('id', gid).limit(1);
       if ((gRows as List).isNotEmpty) {
         _cachedGroup = Group.fromRow(gRows.first);
         return _cachedGroup;
       }
+      // Группа удалена — сбрасываем кеш
+      _cachedGroup = null;
+      _cachedMembership = null;
       return null;
     } catch (e) {
       developer.log('[GroupService] getCurrentGroup error: $e');
@@ -120,6 +129,7 @@ class GroupService {
   static Future<bool> isOwner() async => (await getCurrentGroup())?.ownerId == _uid;
 
   // ── Участники ──
+  // TODO: оптимизировать — заменить N+1 запросы на один JOIN или batch-запрос
   static Future<List<GroupMember>> getMembers() async {
     final gid = await getCurrentGroupId();
     if (gid == null) return [];
@@ -220,22 +230,6 @@ class GroupService {
     }
   }
 
-  static Future<({bool success, String? error})> addMemberByEmail(String email, String groupId) async {
-    if (_uid == null) return (success: false, error: 'Не авторизован');
-    final trimmed = email.trim().toLowerCase();
-    try {
-      final profileRows = await _db.from('profiles').select('id').eq('email', trimmed).limit(1);
-      if ((profileRows as List).isEmpty) return (success: false, error: 'Пользователь не найден');
-      final userId = profileRows.first['id'] as String;
-      final existing = await _db.from('group_members').select('id').eq('group_id', groupId).eq('user_id', userId).limit(1);
-      if ((existing as List).isNotEmpty) return (success: false, error: 'Уже в группе');
-      await _db.from('group_members').insert({'group_id': groupId, 'user_id': userId, 'role': 'member', 'is_student': false});
-      return (success: true, error: null);
-    } catch (e) {
-      return (success: false, error: 'Ошибка: $e');
-    }
-  }
-
   // ══════════════════════════════════════════════════════════════════════════
   // ПРИГЛАШЕНИЯ
   // ══════════════════════════════════════════════════════════════════════════
@@ -277,6 +271,7 @@ class GroupService {
     }
   }
 
+  // TODO: оптимизировать — заменить N+1 запросы на один JOIN или batch-запрос
   static Future<List<GroupInvitation>> getMyInvitations() async {
     if (_uid == null) return [];
     try {

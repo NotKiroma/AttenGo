@@ -1,8 +1,11 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import '../services/attendance_service.dart';
 import '../services/student_service.dart';
 import '../services/group_service.dart';
+import '../services/announcement_service.dart';
 import '../services/schedule_service.dart';
+import '../services/realtime_service.dart';
 import 'student_profile_screen.dart';
 import '../utils/dark_page_route.dart';
 
@@ -22,21 +25,47 @@ class _AttendanceScreenState extends State<AttendanceScreen> with WidgetsBinding
   bool _isLoading = true;
   bool _isWeekend = false;
   bool _hasGroup = false;
+  bool _isCancelledLesson = false;
 
   List<Student> _fullStudents = [];
   List<Lesson> _todaySchedule = [];
+
+  // Ручной выбор пары (null = автоматический режим)
+  int? _manualLessonIndex;
+
+  final List<StreamSubscription> _subs = [];
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _init();
+
+    // Авто-обновление при изменениях в БД
+    _subs.add(
+      RealtimeService.onAttendanceRecordsChanged.listen((_) {
+        if (mounted) _refresh();
+      }),
+    );
+    _subs.add(
+      RealtimeService.onStudentsChanged.listen((_) {
+        if (mounted) _refresh();
+      }),
+    );
+    _subs.add(
+      RealtimeService.onAttendanceLessonsChanged.listen((_) {
+        if (mounted) _refresh();
+      }),
+    );
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _searchController.dispose();
+    for (final sub in _subs) {
+      sub.cancel();
+    }
     super.dispose();
   }
 
@@ -89,6 +118,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> with WidgetsBinding
     setState(() {});
   }
 
+  // Пара которая ИДЁТ ПРЯМО СЕЙЧАС (начало <= now <= конец)
   Lesson? get _activeLesson {
     final nowMin = DateTime.now().hour * 60 + DateTime.now().minute;
     for (final lesson in _todaySchedule) {
@@ -96,6 +126,12 @@ class _AttendanceScreenState extends State<AttendanceScreen> with WidgetsBinding
       final end = _parseTime(lesson.timeEnd);
       if (nowMin >= start && nowMin <= end) return lesson;
     }
+    return null;
+  }
+
+  // Следующая пара (ещё не началась)
+  Lesson? get _upcomingLesson {
+    final nowMin = DateTime.now().hour * 60 + DateTime.now().minute;
     for (final lesson in _todaySchedule) {
       if (nowMin < _parseTime(lesson.timeStart)) return lesson;
     }
@@ -119,21 +155,293 @@ class _AttendanceScreenState extends State<AttendanceScreen> with WidgetsBinding
   }
 
   Future<void> _loadCurrentLesson() async {
-    final active = _activeLesson;
-    if (active == null) {
-      // Нет активного занятия — грузим список студентов (кеш уже сброшен в _refresh)
+    final date = AttendanceService.todayDate();
+
+    // Ручной выбор пары
+    Lesson? lesson;
+    if (_manualLessonIndex != null && _manualLessonIndex! < _todaySchedule.length) {
+      lesson = _todaySchedule[_manualLessonIndex!];
+    } else {
+      // Автоматический режим: активная или следующая
+      _manualLessonIndex = null;
+      final active = _activeLesson;
+      final upcoming = _upcomingLesson;
+      lesson = active ?? upcoming;
+    }
+
+    if (lesson == null) {
       final students = await StudentService.loadAll();
-      _currentLesson = LessonAttendance(date: AttendanceService.todayDate(), lessonKey: 'no_lesson', subject: '', students: students.map((s) => StudentAttendance.fromStudent(s)).toList());
+      _currentLesson = LessonAttendance(date: date, lessonKey: 'no_lesson', subject: '', students: students.map((s) => StudentAttendance.fromStudent(s)).toList());
       _fullStudents = students;
       _currentLessonKey = null;
       return;
     }
-    final key = AttendanceService.lessonKey(active.timeStart, active.timeEnd);
-    _currentLessonKey = key;
-    _currentLesson = await AttendanceService.getOrCreateLesson(date: AttendanceService.todayDate(), lessonKey: key, subject: active.subject);
+
+    final key = AttendanceService.lessonKey(lesson.timeStart, lesson.timeEnd);
+
+    // Проверяем отменена ли пара или весь день
+    final isCancelled = await AnnouncementService.isCancelled(date: date, lessonKey: key);
+    final isDayCancelled = await AnnouncementService.isCancelled(date: date, lessonKey: 'all');
+
+    if (isCancelled || isDayCancelled) {
+      // Пара отменена — показываем студентов без возможности отмечать
+      final students = await StudentService.loadAll();
+      _currentLesson = LessonAttendance(date: date, lessonKey: 'cancelled', subject: lesson.subject, students: students.map((s) => StudentAttendance.fromStudent(s)).toList());
+      _fullStudents = students;
+      _currentLessonKey = null;
+      _isCancelledLesson = true;
+      return;
+    }
+
+    _isCancelledLesson = false;
+
+    // В ручном режиме — всегда разрешаем отмечать
+    // В авто-режиме — только если пара идёт прямо сейчас
+    if (_manualLessonIndex != null) {
+      _currentLessonKey = key;
+    } else {
+      _currentLessonKey = _activeLesson != null ? key : null;
+    }
+
+    _currentLesson = await AttendanceService.getOrCreateLesson(date: date, lessonKey: key, subject: lesson.subject);
+  }
+
+  /// Выбрать пару вручную (по индексу в _todaySchedule)
+  void _selectLesson(int index) async {
+    setState(() {
+      _manualLessonIndex = index;
+      _isLoading = true;
+    });
+    await _loadCurrentLesson();
+    setState(() => _isLoading = false);
+  }
+
+  /// Вернуться в автоматический режим
+  void _resetToAuto() async {
+    setState(() {
+      _manualLessonIndex = null;
+      _isLoading = true;
+    });
+    await _loadCurrentLesson();
+    setState(() => _isLoading = false);
+  }
+
+  /// Найти предыдущую НЕотменённую пару и скопировать статусы
+  Future<void> _copyFromPrevious() async {
+    if (_currentLesson == null || _todaySchedule.isEmpty) return;
+
+    final date = AttendanceService.todayDate();
+
+    // Определяем индекс текущей пары
+    int currentIdx = -1;
+    if (_manualLessonIndex != null) {
+      currentIdx = _manualLessonIndex!;
+    } else {
+      final active = _activeLesson;
+      final upcoming = _upcomingLesson;
+      final target = active ?? upcoming;
+      if (target != null) {
+        currentIdx = _todaySchedule.indexOf(target);
+      }
+    }
+
+    if (currentIdx <= 0) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Нет предыдущей пары')));
+      }
+      return;
+    }
+
+    // Ищем предыдущую НЕотменённую пару (идём назад от currentIdx - 1)
+    LessonAttendance? prevLesson;
+    for (int i = currentIdx - 1; i >= 0; i--) {
+      final l = _todaySchedule[i];
+      final key = AttendanceService.lessonKey(l.timeStart, l.timeEnd);
+      final cancelled = await AnnouncementService.isCancelled(date: date, lessonKey: key);
+      final dayOff = await AnnouncementService.isCancelled(date: date, lessonKey: 'all');
+      if (!cancelled && !dayOff) {
+        prevLesson = await AttendanceService.getCurrentLessonStats(date: date, lessonKey: key);
+        break;
+      }
+    }
+
+    if (prevLesson == null || prevLesson.markedCount == 0) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Предыдущая пара не отмечена')));
+      }
+      return;
+    }
+
+    // Копируем статусы
+    final current = _currentLesson!;
+    for (final student in current.students) {
+      try {
+        final prevStudent = prevLesson.students.firstWhere((s) => s.studentId == student.studentId);
+        if (prevStudent.status != null) {
+          student.status = prevStudent.status;
+        }
+      } catch (_) {
+        // Студент не найден в предыдущей паре — пропускаем
+      }
+    }
+
+    await AttendanceService.saveLesson(current);
+    setState(() {});
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Скопировано с пары «${prevLesson.subject}»'), backgroundColor: const Color(0xFF10232C)));
+    }
+  }
+
+  /// Показать шторку выбора пары
+  void _showLessonPicker() {
+    if (_todaySchedule.isEmpty) return;
+    final w = MediaQuery.of(context).size.width;
+    final fs = w.clamp(320.0, 430.0);
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (ctx) {
+        return Container(
+          constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.6),
+          decoration: const BoxDecoration(
+            color: Color(0xFF152028),
+            borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // Handle
+              Center(
+                child: Container(
+                  width: fs * 0.1,
+                  height: 4,
+                  margin: EdgeInsets.only(top: fs * 0.04, bottom: fs * 0.03),
+                  decoration: BoxDecoration(color: const Color(0xFF455664), borderRadius: BorderRadius.circular(2)),
+                ),
+              ),
+              Padding(
+                padding: EdgeInsets.symmetric(horizontal: fs * 0.05),
+                child: Row(
+                  children: [
+                    Text(
+                      'Выбрать пару',
+                      style: TextStyle(color: Colors.white, fontSize: fs * 0.048, fontWeight: FontWeight.bold),
+                    ),
+                    const Spacer(),
+                    if (_manualLessonIndex != null)
+                      GestureDetector(
+                        onTap: () {
+                          Navigator.pop(ctx);
+                          _resetToAuto();
+                        },
+                        child: Container(
+                          padding: EdgeInsets.symmetric(horizontal: fs * 0.03, vertical: fs * 0.015),
+                          decoration: BoxDecoration(color: const Color(0xFF0D59F2).withValues(alpha: 0.15), borderRadius: BorderRadius.circular(fs * 0.03)),
+                          child: Text(
+                            'Авто',
+                            style: TextStyle(color: const Color(0xFF0D59F2), fontSize: fs * 0.03, fontWeight: FontWeight.w600),
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+              SizedBox(height: fs * 0.02),
+              Container(height: 1, color: const Color(0xFF455664).withValues(alpha: 0.5)),
+              Flexible(
+                child: ListView.builder(
+                  padding: EdgeInsets.fromLTRB(fs * 0.04, fs * 0.02, fs * 0.04, fs * 0.06),
+                  shrinkWrap: true,
+                  itemCount: _todaySchedule.length,
+                  itemBuilder: (_, i) {
+                    final l = _todaySchedule[i];
+                    final isSelected = _manualLessonIndex == i;
+                    final status = getLessonStatus(l.timeStart, l.timeEnd);
+                    final isActive = status == LessonStatus.active;
+                    final isPast = status == LessonStatus.past;
+                    final statusLabel = isActive ? 'СЕЙЧАС' : (isPast ? 'ПРОШЛА' : 'ВПЕРЕДИ');
+                    final statusColor = isActive ? const Color(0xFF0D59F2) : (isPast ? const Color(0xFF455664) : const Color(0xFF94A3B8));
+
+                    return GestureDetector(
+                      onTap: () {
+                        Navigator.pop(ctx);
+                        _selectLesson(i);
+                      },
+                      child: Container(
+                        margin: EdgeInsets.only(bottom: fs * 0.02),
+                        padding: EdgeInsets.all(fs * 0.04),
+                        decoration: BoxDecoration(
+                          color: isSelected ? const Color(0xFF0D59F2).withValues(alpha: 0.1) : const Color(0xFF10232C),
+                          borderRadius: BorderRadius.circular(fs * 0.04),
+                          border: Border.all(color: isSelected ? const Color(0xFF0D59F2) : const Color(0xFF455664), width: isSelected ? 2 : 1),
+                        ),
+                        child: Row(
+                          children: [
+                            // Время
+                            Column(
+                              children: [
+                                Text(
+                                  l.timeStart,
+                                  style: TextStyle(color: Colors.white, fontSize: fs * 0.035, fontWeight: FontWeight.bold),
+                                ),
+                                Text(
+                                  l.timeEnd,
+                                  style: TextStyle(color: const Color(0xFF7D92B1), fontSize: fs * 0.028),
+                                ),
+                              ],
+                            ),
+                            SizedBox(width: fs * 0.04),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    l.subject,
+                                    style: TextStyle(color: Colors.white, fontSize: fs * 0.038, fontWeight: FontWeight.w600),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                  if (l.room.isNotEmpty || l.teacher.isNotEmpty)
+                                    Text(
+                                      [l.room, l.teacher].where((s) => s.isNotEmpty).join(' • '),
+                                      style: TextStyle(color: const Color(0xFF7D92B1), fontSize: fs * 0.028),
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                ],
+                              ),
+                            ),
+                            // Статус
+                            Container(
+                              padding: EdgeInsets.symmetric(horizontal: fs * 0.02, vertical: 3),
+                              decoration: BoxDecoration(color: statusColor.withValues(alpha: 0.15), borderRadius: BorderRadius.circular(fs * 0.02)),
+                              child: Text(
+                                statusLabel,
+                                style: TextStyle(color: statusColor, fontSize: fs * 0.024, fontWeight: FontWeight.bold),
+                              ),
+                            ),
+                            if (isSelected) ...[SizedBox(width: fs * 0.02), Icon(Icons.check_circle, color: const Color(0xFF0D59F2), size: fs * 0.05)],
+                          ],
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
   }
 
   Future<void> _checkLessonChange() async {
+    // В ручном режиме не переключаем пару автоматически
+    if (_manualLessonIndex != null) return;
+
     final active = _activeLesson;
     final newKey = active != null ? AttendanceService.lessonKey(active.timeStart, active.timeEnd) : null;
     if (newKey != _currentLessonKey) {
@@ -256,7 +564,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> with WidgetsBinding
             ),
             const SizedBox(height: 12),
             _buildStatusOption(
-              label: 'ПРИЧИНА',
+              label: 'УВАЖ. ПРИЧИНА',
               color: Colors.orange,
               onTap: () {
                 setState(() => _currentLesson!.students[originalIndex].status = 'late');
@@ -337,7 +645,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> with WidgetsBinding
                     padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
                     shrinkWrap: true,
                     itemCount: filtered.length,
-                    separatorBuilder: (_, __) => const SizedBox(height: 8),
+                    separatorBuilder: (_, _) => const SizedBox(height: 8),
                     itemBuilder: (ctx, i) {
                       final s = filtered[i];
                       return Container(
@@ -458,6 +766,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> with WidgetsBinding
                           if (lastCtrl.text.trim().isEmpty || firstCtrl.text.trim().isEmpty) return;
                           final student = Student(id: '', lastName: lastCtrl.text.trim(), firstName: firstCtrl.text.trim(), middleName: middleCtrl.text.trim(), isMale: isMale);
                           await StudentService.addStudent(student);
+                          if (!ctx.mounted) return;
                           Navigator.pop(ctx);
                           AttendanceService.invalidateCache();
                           await _refresh();
@@ -573,7 +882,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> with WidgetsBinding
             children: [
               Container(
                 padding: EdgeInsets.all(fs * 0.06),
-                decoration: BoxDecoration(color: const Color(0xFF0D59F2).withOpacity(0.1), shape: BoxShape.circle),
+                decoration: BoxDecoration(color: const Color(0xFF0D59F2).withValues(alpha: 0.1), shape: BoxShape.circle),
                 child: Icon(Icons.group_add_outlined, color: const Color(0xFF0D59F2), size: fs * 0.14),
               ),
               SizedBox(height: fs * 0.04),
@@ -616,16 +925,17 @@ class _AttendanceScreenState extends State<AttendanceScreen> with WidgetsBinding
         ),
         centerTitle: true,
         backgroundColor: const Color(0xFF101C22),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.person_add_rounded, color: Color(0xFF0D59F2)),
-            onPressed: _addStudent,
-          ),
-        ],
+
         bottom: PreferredSize(
           preferredSize: const Size.fromHeight(1),
           child: Container(color: const Color(0xFF455664), height: 1),
         ),
+      ),
+      floatingActionButton: FloatingActionButton(
+        heroTag: 'fab_attendance',
+        onPressed: _addStudent,
+        backgroundColor: const Color(0xFF0D59F2),
+        child: const Icon(Icons.person_add_rounded, color: Colors.white),
       ),
       body: _isLoading
           ? const Center(child: CircularProgressIndicator(color: Color(0xFF0D59F2)))
@@ -633,8 +943,12 @@ class _AttendanceScreenState extends State<AttendanceScreen> with WidgetsBinding
               padding: EdgeInsets.symmetric(horizontal: w * 0.03).add(EdgeInsets.only(top: h * 0.02)),
               child: Column(
                 children: [
+                  // Плашка отменённой пары
+                  if (_isCancelledLesson && _currentLesson != null) ...[_buildCancelledBanner(w, h), SizedBox(height: h * 0.015)],
                   // Плашка занятия — только если есть активное занятие
-                  if (_hasActiveLesson) ...[_buildCurrentLessonBanner(w, h), SizedBox(height: h * 0.015)],
+                  if (_hasActiveLesson) ...[_buildCurrentLessonBanner(w, h), SizedBox(height: h * 0.01)],
+                  // Кнопки действий: выбор пары + скопировать с прошлой
+                  if (!_isWeekend && _todaySchedule.isNotEmpty) ...[_buildActionButtons(w, h), SizedBox(height: h * 0.012)],
                   _buildSearchField(w),
                   SizedBox(height: h * 0.018),
                   // Фильтры — только если есть активное занятие
@@ -646,11 +960,109 @@ class _AttendanceScreenState extends State<AttendanceScreen> with WidgetsBinding
     );
   }
 
+  Widget _buildActionButtons(double w, double h) {
+    final isManual = _manualLessonIndex != null;
+    return Row(
+      children: [
+        // Кнопка выбора пары
+        Expanded(
+          child: GestureDetector(
+            onTap: _showLessonPicker,
+            child: Container(
+              padding: EdgeInsets.symmetric(vertical: h * 0.012),
+              decoration: BoxDecoration(
+                color: isManual ? const Color(0xFF0D59F2).withValues(alpha: 0.12) : const Color(0xFF10232C),
+                borderRadius: BorderRadius.circular(w * 0.035),
+                border: Border.all(color: isManual ? const Color(0xFF0D59F2) : const Color(0xFF455664)),
+              ),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(isManual ? Icons.swap_horiz_rounded : Icons.list_alt_rounded, color: isManual ? const Color(0xFF0D59F2) : const Color(0xFF7D92B1), size: w * 0.045),
+                  SizedBox(width: w * 0.015),
+                  Text(
+                    isManual ? 'Пара выбрана' : 'Выбрать пару',
+                    style: TextStyle(color: isManual ? const Color(0xFF0D59F2) : const Color(0xFF7D92B1), fontSize: w * 0.032, fontWeight: FontWeight.w600),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+        SizedBox(width: w * 0.025),
+        // Кнопка «Как на прошлой паре»
+        Expanded(
+          child: GestureDetector(
+            onTap: _hasActiveLesson ? _copyFromPrevious : null,
+            child: Container(
+              padding: EdgeInsets.symmetric(vertical: h * 0.012),
+              decoration: BoxDecoration(
+                color: _hasActiveLesson ? const Color(0xFF34D399).withValues(alpha: 0.1) : const Color(0xFF10232C).withValues(alpha: 0.5),
+                borderRadius: BorderRadius.circular(w * 0.035),
+                border: Border.all(color: _hasActiveLesson ? const Color(0xFF34D399).withValues(alpha: 0.5) : const Color(0xFF455664).withValues(alpha: 0.3)),
+              ),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(Icons.content_copy_rounded, color: _hasActiveLesson ? const Color(0xFF34D399) : const Color(0xFF455664), size: w * 0.04),
+                  SizedBox(width: w * 0.015),
+                  Flexible(
+                    child: Text(
+                      'Как на прошлой',
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(color: _hasActiveLesson ? const Color(0xFF34D399) : const Color(0xFF455664), fontSize: w * 0.03, fontWeight: FontWeight.w600),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildCancelledBanner(double w, double h) {
+    final subject = _currentLesson?.subject ?? '';
+    return Container(
+      width: double.infinity,
+      padding: EdgeInsets.symmetric(horizontal: w * 0.04, vertical: h * 0.014),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF87171).withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(w * 0.04),
+        border: Border.all(color: const Color(0xFFF87171).withValues(alpha: 0.5), width: 1.5),
+      ),
+      child: Row(
+        children: [
+          Container(
+            padding: EdgeInsets.symmetric(horizontal: w * 0.025, vertical: 3),
+            decoration: BoxDecoration(color: const Color(0xFFF87171).withValues(alpha: 0.15), borderRadius: BorderRadius.circular(w * 0.03)),
+            child: Text(
+              'ОТМЕНЕНА',
+              style: TextStyle(color: const Color(0xFFF87171), fontSize: w * 0.028, fontWeight: FontWeight.bold),
+            ),
+          ),
+          SizedBox(width: w * 0.025),
+          Expanded(
+            child: Text(
+              subject.isNotEmpty ? subject : 'Пара отменена',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(color: const Color(0xFFF87171), fontSize: w * 0.036, fontWeight: FontWeight.w600),
+            ),
+          ),
+          Icon(Icons.cancel_outlined, color: const Color(0xFFF87171).withValues(alpha: 0.7), size: w * 0.05),
+        ],
+      ),
+    );
+  }
+
   Widget _buildCurrentLessonBanner(double w, double h) {
     if (_currentLesson == null || !_hasActiveLesson) return const SizedBox.shrink();
     final lesson = _currentLesson!;
     final active = _activeLesson;
     final isNow = active != null && AttendanceService.lessonKey(active.timeStart, active.timeEnd) == lesson.lessonKey;
+    final isManual = _manualLessonIndex != null;
 
     return Container(
       width: double.infinity,
@@ -658,7 +1070,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> with WidgetsBinding
       decoration: BoxDecoration(
         color: const Color(0xFF10232C),
         borderRadius: BorderRadius.circular(w * 0.04),
-        border: Border.all(color: isNow ? const Color(0xFF0D59F2) : const Color(0xFF455664), width: 1.5),
+        border: Border.all(color: isNow ? const Color(0xFF0D59F2) : (isManual ? const Color(0xFFFACC15) : const Color(0xFF455664)), width: 1.5),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -667,10 +1079,10 @@ class _AttendanceScreenState extends State<AttendanceScreen> with WidgetsBinding
             children: [
               Container(
                 padding: EdgeInsets.symmetric(horizontal: w * 0.025, vertical: 3),
-                decoration: BoxDecoration(color: isNow ? const Color(0x200D59F2) : const Color(0x20455664), borderRadius: BorderRadius.circular(w * 0.03)),
+                decoration: BoxDecoration(color: isManual ? const Color(0xFFFACC15).withValues(alpha: 0.15) : (isNow ? const Color(0x200D59F2) : const Color(0x20455664)), borderRadius: BorderRadius.circular(w * 0.03)),
                 child: Text(
-                  isNow ? 'ИДЁТ СЕЙЧАС' : 'СЛЕДУЮЩАЯ',
-                  style: TextStyle(color: isNow ? const Color(0xFF0D59F2) : const Color(0xFF7D92B1), fontSize: w * 0.028, fontWeight: FontWeight.bold),
+                  isManual ? 'РУЧНОЙ ВЫБОР' : (isNow ? 'ИДЁТ СЕЙЧАС' : 'СЛЕДУЮЩАЯ'),
+                  style: TextStyle(color: isManual ? const Color(0xFFFACC15) : (isNow ? const Color(0xFF0D59F2) : const Color(0xFF7D92B1)), fontSize: w * 0.028, fontWeight: FontWeight.bold),
                 ),
               ),
               SizedBox(width: w * 0.02),
@@ -756,7 +1168,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> with WidgetsBinding
         ),
         SizedBox(width: w * 0.02),
         Expanded(
-          child: _buildFilterChip(label: 'ПРИЧИНА', color: Colors.orange, w: w, onTap: () => _showStudentsByStatus('late', Colors.orange, 'Причина')),
+          child: _buildFilterChip(label: 'УВАЖ. ПРИЧИНА', color: Colors.orange, w: w, onTap: () => _showStudentsByStatus('late', Colors.orange, 'Уваж. причина')),
         ),
       ],
     );
@@ -828,7 +1240,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> with WidgetsBinding
         child: ListView.separated(
           physics: const AlwaysScrollableScrollPhysics(),
           itemCount: indexes.length,
-          separatorBuilder: (_, __) => SizedBox(height: h * 0.01),
+          separatorBuilder: (_, _) => SizedBox(height: h * 0.01),
           itemBuilder: (context, i) {
             final idx = indexes[i];
             final student = students[idx];
@@ -886,7 +1298,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> with WidgetsBinding
                       ElevatedButton(
                         onPressed: () => _showStatusSheet(context, idx),
                         style: ElevatedButton.styleFrom(
-                          backgroundColor: hasStatus ? _statusColor(student.status).withOpacity(0.15) : const Color(0xFF0D59F2),
+                          backgroundColor: hasStatus ? _statusColor(student.status).withValues(alpha: 0.15) : const Color(0xFF0D59F2),
                           foregroundColor: hasStatus ? _statusColor(student.status) : Colors.white,
                           elevation: 0,
                           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(w * 0.04)),

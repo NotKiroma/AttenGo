@@ -97,7 +97,14 @@ class _LoginScreenState extends State<LoginScreen> {
               // Email
               _label(fs, 'Почта'),
               SizedBox(height: h * 0.008),
-              _inputField(fs: fs, controller: _emailCtrl, hint: 'example@mail.com', icon: Icons.email_outlined, keyboardType: TextInputType.emailAddress),
+              _inputField(
+                fs: fs,
+                controller: _emailCtrl,
+                hint: 'example@mail.com',
+                icon: Icons.email_outlined,
+                keyboardType: TextInputType.emailAddress,
+                textInputAction: TextInputAction.next,
+              ),
 
               SizedBox(height: h * 0.02),
 
@@ -110,6 +117,8 @@ class _LoginScreenState extends State<LoginScreen> {
                 hint: 'Введите пароль',
                 icon: Icons.lock_outline,
                 obscure: _obscurePassword,
+                textInputAction: TextInputAction.done,
+                onSubmitted: (_) => _login(),
                 suffixIcon: IconButton(
                   icon: Icon(_obscurePassword ? Icons.visibility_off_outlined : Icons.visibility_outlined, color: const Color(0xFF7D92B1), size: fs * 0.05),
                   onPressed: () => setState(() => _obscurePassword = !_obscurePassword),
@@ -123,9 +132,9 @@ class _LoginScreenState extends State<LoginScreen> {
                   width: double.infinity,
                   padding: EdgeInsets.all(fs * 0.03),
                   decoration: BoxDecoration(
-                    color: const Color(0xFFF87171).withOpacity(0.1),
+                    color: const Color(0xFFF87171).withValues(alpha: 0.1),
                     borderRadius: BorderRadius.circular(fs * 0.03),
-                    border: Border.all(color: const Color(0xFFF87171).withOpacity(0.3)),
+                    border: Border.all(color: const Color(0xFFF87171).withValues(alpha: 0.3)),
                   ),
                   child: Row(
                     children: [
@@ -152,7 +161,7 @@ class _LoginScreenState extends State<LoginScreen> {
                   style: ElevatedButton.styleFrom(
                     backgroundColor: const Color(0xFF0D59F2),
                     foregroundColor: Colors.white,
-                    disabledBackgroundColor: const Color(0xFF0D59F2).withOpacity(0.5),
+                    disabledBackgroundColor: const Color(0xFF0D59F2).withValues(alpha: 0.5),
                     padding: EdgeInsets.symmetric(vertical: h * 0.02),
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(fs * 0.04)),
                     elevation: 0,
@@ -208,7 +217,17 @@ class _LoginScreenState extends State<LoginScreen> {
     );
   }
 
-  Widget _inputField({required double fs, required TextEditingController controller, required String hint, required IconData icon, bool obscure = false, Widget? suffixIcon, TextInputType? keyboardType}) {
+  Widget _inputField({
+    required double fs,
+    required TextEditingController controller,
+    required String hint,
+    required IconData icon,
+    bool obscure = false,
+    Widget? suffixIcon,
+    TextInputType? keyboardType,
+    TextInputAction? textInputAction,
+    ValueChanged<String>? onSubmitted,
+  }) {
     return Container(
       decoration: BoxDecoration(
         color: const Color(0xFF10232C),
@@ -219,6 +238,8 @@ class _LoginScreenState extends State<LoginScreen> {
         controller: controller,
         obscureText: obscure,
         keyboardType: keyboardType,
+        textInputAction: textInputAction,
+        onSubmitted: onSubmitted,
         style: TextStyle(color: Colors.white, fontSize: fs * 0.038),
         decoration: InputDecoration(
           hintText: hint,

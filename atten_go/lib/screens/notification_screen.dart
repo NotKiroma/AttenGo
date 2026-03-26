@@ -1,7 +1,9 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import '../services/notification_service.dart';
 import '../services/group_service.dart';
 import '../services/attendance_service.dart';
+import '../services/realtime_service.dart';
 
 class NotificationScreen extends StatefulWidget {
   const NotificationScreen({super.key});
@@ -14,21 +16,44 @@ class _NotificationScreenState extends State<NotificationScreen> {
   List<GroupInvitation> _invitations = [];
   bool _isLoading = true;
 
+  final List<StreamSubscription> _subs = [];
+
   @override
   void initState() {
     super.initState();
     _load();
+
+    // Авто-обновление при новых уведомлениях/приглашениях
+    _subs.add(
+      RealtimeService.onNotificationsChanged.listen((_) {
+        if (mounted) _load();
+      }),
+    );
+    _subs.add(
+      RealtimeService.onInvitationsChanged.listen((_) {
+        if (mounted) _load();
+      }),
+    );
+  }
+
+  @override
+  void dispose() {
+    for (final sub in _subs) {
+      sub.cancel();
+    }
+    super.dispose();
   }
 
   Future<void> _load() async {
     final n = await NotificationService.loadAll();
     final inv = await GroupService.getMyInvitations();
-    if (mounted)
+    if (mounted) {
       setState(() {
         _notifications = n;
         _invitations = inv;
         _isLoading = false;
       });
+    }
   }
 
   Future<void> _accept(GroupInvitation inv) async {
@@ -38,12 +63,12 @@ class _NotificationScreenState extends State<NotificationScreen> {
       GroupService.invalidateCache();
       _load();
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Вы вступили в группу'), backgroundColor: Color(0xFF10232C)));
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Вы вступили в группу')));
         // Передаём true — роль изменилась, MainScreen должен перезагрузить вкладки
         Navigator.pop(context, true);
       }
     } else if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(res.error ?? 'Ошибка'), backgroundColor: const Color(0xFF10232C)));
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(res.error ?? 'Ошибка')));
     }
   }
 
@@ -148,7 +173,7 @@ class _NotificationScreenState extends State<NotificationScreen> {
       decoration: BoxDecoration(
         color: const Color(0xFF10232C),
         borderRadius: BorderRadius.circular(fs * 0.04),
-        border: Border.all(color: const Color(0xFF0D59F2).withOpacity(0.5), width: 1.5),
+        border: Border.all(color: const Color(0xFF0D59F2).withValues(alpha: 0.5), width: 1.5),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -157,7 +182,7 @@ class _NotificationScreenState extends State<NotificationScreen> {
             children: [
               Container(
                 padding: EdgeInsets.all(fs * 0.022),
-                decoration: BoxDecoration(color: const Color(0xFF0D59F2).withOpacity(0.15), borderRadius: BorderRadius.circular(fs * 0.03)),
+                decoration: BoxDecoration(color: const Color(0xFF0D59F2).withValues(alpha: 0.15), borderRadius: BorderRadius.circular(fs * 0.03)),
                 child: Icon(Icons.group_add_rounded, color: const Color(0xFF0D59F2), size: fs * 0.05),
               ),
               SizedBox(width: fs * 0.03),
@@ -256,7 +281,7 @@ class _NotificationScreenState extends State<NotificationScreen> {
       background: Container(
         alignment: Alignment.centerRight,
         padding: EdgeInsets.only(right: fs * 0.05),
-        decoration: BoxDecoration(color: const Color(0xFFF87171).withOpacity(0.2), borderRadius: BorderRadius.circular(fs * 0.04)),
+        decoration: BoxDecoration(color: const Color(0xFFF87171).withValues(alpha: 0.2), borderRadius: BorderRadius.circular(fs * 0.04)),
         child: Icon(Icons.delete_outline, color: const Color(0xFFF87171), size: fs * 0.06),
       ),
       child: Container(
@@ -265,14 +290,14 @@ class _NotificationScreenState extends State<NotificationScreen> {
         decoration: BoxDecoration(
           color: const Color(0xFF10232C),
           borderRadius: BorderRadius.circular(fs * 0.04),
-          border: Border.all(color: n.isRead ? const Color(0xFF455664).withOpacity(0.5) : const Color(0xFF455664)),
+          border: Border.all(color: n.isRead ? const Color(0xFF455664).withValues(alpha: 0.5) : const Color(0xFF455664)),
         ),
         child: Row(
           children: [
             Container(
               width: fs * 0.1,
               height: fs * 0.1,
-              decoration: BoxDecoration(color: const Color(0xFF0D59F2).withOpacity(0.15), borderRadius: BorderRadius.circular(fs * 0.03)),
+              decoration: BoxDecoration(color: const Color(0xFF0D59F2).withValues(alpha: 0.15), borderRadius: BorderRadius.circular(fs * 0.03)),
               child: Icon(n.type == 'invite_accepted' ? Icons.check_circle_outline : Icons.notifications_rounded, color: const Color(0xFF0D59F2), size: fs * 0.05),
             ),
             SizedBox(width: fs * 0.03),
@@ -285,7 +310,7 @@ class _NotificationScreenState extends State<NotificationScreen> {
                     style: TextStyle(color: Colors.white, fontSize: fs * 0.035, fontWeight: n.isRead ? FontWeight.normal : FontWeight.w600),
                   ),
                   if (n.body.isNotEmpty) ...[
-                    SizedBox(height: 2),
+                    const SizedBox(height: 2),
                     Text(
                       n.body,
                       style: TextStyle(color: const Color(0xFF7D92B1), fontSize: fs * 0.03),

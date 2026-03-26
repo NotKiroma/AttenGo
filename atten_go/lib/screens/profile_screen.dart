@@ -1,11 +1,47 @@
+import 'dart:async';
 import 'dart:typed_data';
+import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import '../services/auth_service.dart';
 import '../services/group_service.dart';
 import '../services/attendance_service.dart';
 import '../services/db_service.dart';
+import '../services/realtime_service.dart';
 import '../utils/dark_page_route.dart';
+
+// Сжатие изображения — работает в main isolate (dart:ui требует Flutter engine)
+Future<Uint8List> _compressImageBytes(Uint8List input) async {
+  try {
+    const maxSize = 400; // максимум 400px по большей стороне
+
+    // Первый проход — декодируем и масштабируем
+    final codec = await ui.instantiateImageCodec(input, targetWidth: maxSize, targetHeight: maxSize);
+    final frame = await codec.getNextFrame();
+    final pngData = await frame.image.toByteData(format: ui.ImageByteFormat.png);
+    frame.image.dispose();
+
+    if (pngData == null) {
+      return input;
+    }
+    final result = Uint8List.view(pngData.buffer);
+
+    // Если всё ещё больше 1.5MB — повторяем с меньшим размером
+    if (result.lengthInBytes > 1024 * 1024) {
+      final codec2 = await ui.instantiateImageCodec(result, targetWidth: 256, targetHeight: 256);
+      final frame2 = await codec2.getNextFrame();
+      final pngData2 = await frame2.image.toByteData(format: ui.ImageByteFormat.png);
+      frame2.image.dispose();
+      if (pngData2 != null) {
+        return Uint8List.view(pngData2.buffer);
+      }
+    }
+
+    return result;
+  } catch (_) {
+    return input;
+  }
+}
 
 class ProfileScreen extends StatefulWidget {
   final VoidCallback? onRoleChanged;
@@ -29,10 +65,29 @@ class _ProfileScreenState extends State<ProfileScreen> {
   final Map<String, Map<String, dynamic>> _subjectStats = {};
   final Set<String> _expandedSubjects = {};
 
+  final List<StreamSubscription> _subs = [];
+
   @override
   void initState() {
     super.initState();
     _load();
+
+    // Авто-обновление при изменениях профиля, группы, посещаемости
+    _subs.add(
+      RealtimeService.onProfilesChanged.listen((_) {
+        if (mounted) _load();
+      }),
+    );
+    _subs.add(
+      RealtimeService.onGroupMembersChanged.listen((_) {
+        if (mounted) _load();
+      }),
+    );
+    _subs.add(
+      RealtimeService.onAttendanceRecordsChanged.listen((_) {
+        if (mounted) _load();
+      }),
+    );
   }
 
   Future<void> _load() async {
@@ -50,21 +105,26 @@ class _ProfileScreenState extends State<ProfileScreen> {
       await _loadMyStats();
     }
 
-    if (mounted)
+    if (mounted) {
       setState(() {
         _profile = profile;
         _membership = membership;
         _currentGroup = currentGroup;
         _isLoading = false;
       });
+    }
   }
 
   Future<void> _loadMyStats() async {
     final uid = AuthService.currentUserId;
-    if (uid == null) return;
+    if (uid == null) {
+      return;
+    }
     try {
       final gid = await GroupService.getCurrentGroupId();
-      if (gid == null) return;
+      if (gid == null) {
+        return;
+      }
       final db = DatabaseService.client;
       final studentRows = await db.from('students').select('id').eq('group_id', gid).eq('linked_user_id', uid).limit(1);
       if ((studentRows as List).isEmpty) return;
@@ -72,18 +132,28 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
       final all = await AttendanceService.loadAll();
       for (final lesson in all) {
-        if (lesson.lessonKey == 'weekend') continue;
+        if (lesson.lessonKey == 'weekend') {
+          continue;
+        }
         StudentAttendance? sa;
         try {
           sa = lesson.students.firstWhere((s) => s.studentId == myStudentId);
         } catch (_) {
           continue;
         }
-        if (sa.status == null) continue;
+        if (sa.status == null) {
+          continue;
+        }
         _totalLessons++;
-        if (sa.status == 'present') _attended++;
-        if (sa.status == 'absent') _missed++;
-        if (sa.status == 'late') _excused++;
+        if (sa.status == 'present') {
+          _attended++;
+        }
+        if (sa.status == 'absent') {
+          _missed++;
+        }
+        if (sa.status == 'late') {
+          _excused++;
+        }
 
         _subjectStats.putIfAbsent(lesson.subject, () => {'present': 0, 'absent': 0, 'late': 0, 'total': 0});
         _subjectStats[lesson.subject]!['total']++;
@@ -92,15 +162,27 @@ class _ProfileScreenState extends State<ProfileScreen> {
     } catch (_) {}
   }
 
+  @override
+  void dispose() {
+    for (final sub in _subs) {
+      sub.cancel();
+    }
+    super.dispose();
+  }
+
   void _toggleGroupMember(bool value) {
     // Optimistic update — сразу меняем UI без ожидания сервера
-    if (_membership == null) return;
+    if (_membership == null) {
+      return;
+    }
     setState(() {
       _membership = GroupMember(id: _membership!.id, groupId: _membership!.groupId, userId: _membership!.userId, role: _membership!.role, isStudent: value, email: _membership!.email, firstName: _membership!.firstName, lastName: _membership!.lastName, avatarUrl: _membership!.avatarUrl);
     });
     // Запрос в фоне — не блокируем UI
     GroupService.toggleIsStudent(value).then((_) {
-      if (mounted) _load();
+      if (mounted) {
+        _load();
+      }
     });
   }
 
@@ -133,27 +215,31 @@ class _ProfileScreenState extends State<ProfileScreen> {
         );
       },
     );
-    if (source == null) return;
+    if (source == null) {
+      return;
+    }
 
     try {
       final picker = ImagePicker();
       final image = await picker.pickImage(source: source);
-      if (image == null) return;
+      if (image == null) {
+        return;
+      }
 
       setState(() => _isLoading = true);
-      final bytes = await image.readAsBytes();
-      final ext = image.name.split('.').last.toLowerCase();
-      final mime = ext == 'png' ? 'png' : 'jpeg';
-      final result = await AuthService.uploadAvatar(bytes, mime);
+      final rawBytes = await image.readAsBytes();
+      // Сжимаем до 400px (dart:ui требует main isolate)
+      final bytes = await _compressImageBytes(rawBytes);
+      final result = await AuthService.uploadAvatar(bytes);
       if (result.success) {
         await _load();
       } else if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(result.error ?? 'Ошибка'), backgroundColor: const Color(0xFF10232C)));
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(result.error ?? 'Ошибка')));
         setState(() => _isLoading = false);
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Ошибка: $e'), backgroundColor: const Color(0xFF10232C)));
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Ошибка: $e')));
         setState(() => _isLoading = false);
       }
     }
@@ -196,28 +282,39 @@ class _ProfileScreenState extends State<ProfileScreen> {
       if (res.success) {
         AttendanceService.invalidateCache();
         await _load();
-        widget.onRoleChanged?.call(); // пересоздаёт вкладки в MainScreen
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Группа «${res.group!.name}» создана'), backgroundColor: const Color(0xFF10232C)));
+        widget.onRoleChanged?.call();
+        if (!mounted) {
+          return;
+        }
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Группа «${res.group!.name}» создана')));
       } else {
         setState(() => _isLoading = false);
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(res.error ?? 'Ошибка'), backgroundColor: const Color(0xFF10232C)));
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(res.error ?? 'Ошибка')));
       }
     }
   }
 
   void _openMyGroup() {
-    if (_currentGroup == null) return;
+    if (_currentGroup == null) {
+      return;
+    }
     Navigator.push(context, DarkPageRoute(builder: (_) => _MyGroupScreen(group: _currentGroup!))).then((result) {
       _load();
       // Если группа удалена — уведомляем главный экран об изменении роли
-      if (result == 'deleted') widget.onRoleChanged?.call();
+      if (result == 'deleted') {
+        widget.onRoleChanged?.call();
+      }
     });
   }
 
   void _editProfile() async {
-    if (_profile == null) return;
+    if (_profile == null) {
+      return;
+    }
     final updated = await Navigator.push<bool>(context, DarkPageRoute(builder: (_) => _EditProfileScreen(profile: _profile!)));
-    if (updated == true) _load();
+    if (updated == true) {
+      _load();
+    }
   }
 
   void _changePassword() => Navigator.push(context, DarkPageRoute(builder: (_) => const _ChangePasswordScreen()));
@@ -300,9 +397,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
                     _buildInfoCard(fs),
                     SizedBox(height: h * 0.02),
 
-                    // Галочка «Я — участник группы»
-                    _buildGroupMemberToggle(fs),
-                    SizedBox(height: h * 0.012),
+                    // Галочка «Я — участник группы» — только для owner/admin своей группы
+                    if (_currentGroup != null && (_membership?.canManage == true)) ...[_buildGroupMemberToggle(fs), SizedBox(height: h * 0.012)],
 
                     // Моя статистика (если член группы)
                     if (_membership?.isStudent == true) ...[_buildStatsGrid(fs, h), SizedBox(height: h * 0.012), if (_subjectStats.isNotEmpty) _buildSubjectStats(fs, h), SizedBox(height: h * 0.008)],
@@ -355,7 +451,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                           child: Image.network(
                             url,
                             fit: BoxFit.cover,
-                            errorBuilder: (_, __, ___) => Center(
+                            errorBuilder: (_, _, _) => Center(
                               child: Text(
                                 _profile?.initials ?? '?',
                                 style: TextStyle(color: Colors.white, fontSize: fs * 0.09, fontWeight: FontWeight.bold),
@@ -412,7 +508,17 @@ class _ProfileScreenState extends State<ProfileScreen> {
         borderRadius: BorderRadius.circular(fs * 0.04),
         border: Border.all(color: const Color(0xFF455664), width: 1),
       ),
-      child: Column(children: [_infoRow(fs, Icons.person_outline, 'Имя', _profile?.firstName ?? '—'), _divider(fs), _infoRow(fs, Icons.person_outline, 'Фамилия', _profile?.lastName ?? '—'), _divider(fs), _infoRow(fs, Icons.email_outlined, 'Почта', _profile?.email ?? '—')]),
+      child: Column(
+        children: [
+          _infoRow(fs, Icons.person_outline, 'Имя', _profile?.firstName ?? '—'),
+          _divider(fs),
+          _infoRow(fs, Icons.person_outline, 'Фамилия', _profile?.lastName ?? '—'),
+          _divider(fs),
+          _infoRow(fs, Icons.email_outlined, 'Почта', _profile?.email ?? '—'),
+          _divider(fs),
+          _infoRow(fs, Icons.fingerprint_outlined, 'ID пользователя', AuthService.currentUserId?.substring(0, 8).toUpperCase() ?? '—'),
+        ],
+      ),
     );
   }
 
@@ -444,7 +550,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
               ],
             ),
           ),
-          Switch.adaptive(value: isMember, onChanged: _toggleGroupMember, activeColor: const Color(0xFF0D59F2), inactiveTrackColor: const Color(0xFF455664)),
+          Switch.adaptive(value: isMember, onChanged: _toggleGroupMember, activeThumbColor: const Color(0xFF0D59F2), inactiveTrackColor: const Color(0xFF455664)),
         ],
       ),
     );
@@ -452,20 +558,23 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
   // ── Статистика: 4 карточки как в StudentProfileScreen ──
 
-  double _attendPercent() {
-    if (_totalLessons == 0) return 0;
-    return _attended / _totalLessons;
-  }
-
   Color _gradeColor(double p) {
-    if (p >= 0.9) return const Color(0xFF34D399);
-    if (p >= 0.7) return const Color(0xFFFACC15);
+    if (p >= 0.9) {
+      return const Color(0xFF34D399);
+    }
+    if (p >= 0.7) {
+      return const Color(0xFFFACC15);
+    }
     return const Color(0xFFF87171);
   }
 
   String _grade(double p) {
-    if (p >= 0.9) return 'ХОРОШО';
-    if (p >= 0.7) return 'СРЕДНЕ';
+    if (p >= 0.9) {
+      return 'ХОРОШО';
+    }
+    if (p >= 0.7) {
+      return 'СРЕДНЕ';
+    }
     return 'ПЛОХО';
   }
 
@@ -495,7 +604,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
             ),
             SizedBox(width: fs * 0.03),
             Expanded(
-              child: _statCard(fs, h, label: 'Уважительных', value: '$_excused', badge: '$excusedPct%', badgeColor: const Color(0xFFFACC15)),
+              child: _statCard(fs, h, label: 'Уваж. причина', value: '$_excused', badge: '$excusedPct%', badgeColor: const Color(0xFFFACC15)),
             ),
           ],
         ),
@@ -526,7 +635,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
           SizedBox(height: h * 0.008),
           Container(
             padding: EdgeInsets.symmetric(horizontal: fs * 0.025, vertical: 3),
-            decoration: BoxDecoration(color: badgeColor.withOpacity(0.15), borderRadius: BorderRadius.circular(fs * 0.04)),
+            decoration: BoxDecoration(color: badgeColor.withValues(alpha: 0.15), borderRadius: BorderRadius.circular(fs * 0.04)),
             child: Text(
               badge,
               style: TextStyle(color: badgeColor, fontSize: fs * 0.028, fontWeight: FontWeight.bold),
@@ -579,10 +688,11 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
     return GestureDetector(
       onTap: () => setState(() {
-        if (isExpanded)
+        if (isExpanded) {
           _expandedSubjects.remove(subject);
-        else
+        } else {
           _expandedSubjects.add(subject);
+        }
       }),
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 200),
@@ -608,9 +718,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
                 Container(
                   padding: EdgeInsets.symmetric(horizontal: fs * 0.025, vertical: 4),
                   decoration: BoxDecoration(
-                    color: color.withOpacity(0.15),
+                    color: color.withValues(alpha: 0.15),
                     borderRadius: BorderRadius.circular(fs * 0.04),
-                    border: Border.all(color: color.withOpacity(0.5)),
+                    border: Border.all(color: color.withValues(alpha: 0.5)),
                   ),
                   child: Text(
                     grade,
@@ -632,7 +742,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
             ),
             if (isExpanded) ...[
               SizedBox(height: h * 0.012),
-              Container(height: 1, color: const Color(0xFF455664).withOpacity(0.5)),
+              Container(height: 1, color: const Color(0xFF455664).withValues(alpha: 0.5)),
               SizedBox(height: h * 0.012),
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -673,7 +783,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   SizedBox(width: fs * 0.02),
                   _detailChip(fs, 'Пропуски', '${stats['absent']}', const Color(0xFFF87171)),
                   SizedBox(width: fs * 0.02),
-                  _detailChip(fs, 'Причина', '${stats['late']}', const Color(0xFFFACC15)),
+                  _detailChip(fs, 'Уваж. причина', '${stats['late']}', const Color(0xFFFACC15)),
                 ],
               ),
             ],
@@ -687,7 +797,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
     return Expanded(
       child: Container(
         padding: EdgeInsets.symmetric(vertical: fs * 0.02),
-        decoration: BoxDecoration(color: color.withOpacity(0.08), borderRadius: BorderRadius.circular(fs * 0.04)),
+        decoration: BoxDecoration(color: color.withValues(alpha: 0.08), borderRadius: BorderRadius.circular(fs * 0.04)),
         child: Column(
           children: [
             Text(
@@ -696,7 +806,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
             ),
             Text(
               label,
-              style: TextStyle(color: color.withOpacity(0.7), fontSize: fs * 0.025),
+              style: TextStyle(color: color.withValues(alpha: 0.7), fontSize: fs * 0.025),
             ),
           ],
         ),
@@ -733,7 +843,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
   Widget _divider(double fs) => Padding(
     padding: EdgeInsets.symmetric(vertical: fs * 0.025),
-    child: Container(height: 1, color: const Color(0xFF455664).withOpacity(0.5)),
+    child: Container(height: 1, color: const Color(0xFF455664).withValues(alpha: 0.5)),
   );
 
   Widget _buildActionTile({required double fs, required IconData icon, required String label, required VoidCallback onTap, Color? color, String? subtitle}) {
@@ -794,6 +904,7 @@ class _MyGroupScreenState extends State<_MyGroupScreen> {
   List<GroupMember> _members = [];
   bool _isLoading = true;
   bool _isOwner = false;
+  bool _canManage = false; // owner или admin
 
   @override
   void initState() {
@@ -804,12 +915,15 @@ class _MyGroupScreenState extends State<_MyGroupScreen> {
   Future<void> _load() async {
     final members = await GroupService.getMembers();
     final isOwner = await GroupService.isOwner();
-    if (mounted)
+    final canManage = await GroupService.canManage();
+    if (mounted) {
       setState(() {
         _members = members;
         _isOwner = isOwner;
+        _canManage = canManage;
         _isLoading = false;
       });
+    }
   }
 
   void _addMember() async {
@@ -849,18 +963,237 @@ class _MyGroupScreenState extends State<_MyGroupScreen> {
         ],
       ),
     );
-    if (confirmed != true) return;
+    if (confirmed != true) {
+      return;
+    }
 
     setState(() => _isLoading = true);
     final res = await GroupService.deleteGroup();
     if (mounted) {
       if (res.success) {
         GroupService.invalidateCache();
-        // Возвращаемся на профиль и перезагружаем его
         Navigator.pop(context, 'deleted');
       } else {
         setState(() => _isLoading = false);
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(res.error ?? 'Ошибка'), backgroundColor: const Color(0xFF10232C)));
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(res.error ?? 'Ошибка')));
+      }
+    }
+  }
+
+  Future<bool?> _confirmRemove(GroupMember m) async {
+    final fs = MediaQuery.of(context).size.width.clamp(320.0, 430.0);
+    return showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF10232C),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(fs * 0.04)),
+        title: Text(
+          'Удалить участника?',
+          style: TextStyle(color: Colors.white, fontSize: fs * 0.045),
+        ),
+        content: Text(
+          '${m.fullName.isNotEmpty ? m.fullName : m.email ?? 'Пользователь'} будет удалён из группы.',
+          style: TextStyle(color: const Color(0xFF7D92B1), fontSize: fs * 0.035),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: Text(
+              'Отмена',
+              style: TextStyle(color: const Color(0xFF7D92B1), fontSize: fs * 0.036),
+            ),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text(
+              'Удалить',
+              style: TextStyle(color: const Color(0xFFF87171), fontSize: fs * 0.036, fontWeight: FontWeight.w700),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _removeMember(GroupMember m) async {
+    setState(() => _isLoading = true);
+    await GroupService.removeMember(m.id);
+    await _load();
+  }
+
+  void _showMemberSheet(GroupMember m) {
+    final fs = MediaQuery.of(context).size.width.clamp(320.0, 430.0);
+    final name = m.fullName.isNotEmpty ? m.fullName : m.email ?? 'Пользователь';
+    final isAdmin = m.role == 'admin';
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => Container(
+        decoration: const BoxDecoration(
+          color: Color(0xFF152028),
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        ),
+        padding: EdgeInsets.fromLTRB(fs * 0.05, fs * 0.04, fs * 0.05, fs * 0.06),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // Handle
+            Container(
+              width: fs * 0.1,
+              height: 4,
+              margin: EdgeInsets.only(bottom: fs * 0.04),
+              decoration: BoxDecoration(color: const Color(0xFF455664), borderRadius: BorderRadius.circular(2)),
+            ),
+            // Имя участника
+            Row(
+              children: [
+                Container(
+                  width: fs * 0.11,
+                  height: fs * 0.11,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: const Color(0xFF0D59F2),
+                    image: m.avatarUrl != null ? DecorationImage(image: NetworkImage(m.avatarUrl!), fit: BoxFit.cover) : null,
+                  ),
+                  child: m.avatarUrl == null
+                      ? Center(
+                          child: Text(
+                            _initials(name),
+                            style: TextStyle(color: Colors.white, fontSize: fs * 0.038, fontWeight: FontWeight.bold),
+                          ),
+                        )
+                      : null,
+                ),
+                SizedBox(width: fs * 0.03),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        name,
+                        style: TextStyle(color: Colors.white, fontSize: fs * 0.042, fontWeight: FontWeight.bold),
+                      ),
+                      if (m.email != null && m.fullName.isNotEmpty)
+                        Text(
+                          m.email!,
+                          style: TextStyle(color: const Color(0xFF7D92B1), fontSize: fs * 0.03),
+                        ),
+                      SizedBox(height: 4),
+                      _badge(fs, isAdmin ? 'Администратор' : 'Участник', isAdmin ? const Color(0xFFFACC15) : const Color(0xFF455664)),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            SizedBox(height: fs * 0.045),
+            // Кнопка смены роли
+            _sheetAction(
+              ctx: ctx,
+              fs: fs,
+              icon: isAdmin ? Icons.person_outline : Icons.admin_panel_settings_outlined,
+              label: isAdmin ? 'Сделать участником' : 'Назначить администратором',
+              color: isAdmin ? const Color(0xFF0D59F2) : const Color(0xFFFACC15),
+              onTap: () {
+                Navigator.pop(ctx);
+                _changeRole(m);
+              },
+            ),
+            SizedBox(height: fs * 0.025),
+            // Кнопка удаления
+            _sheetAction(
+              ctx: ctx,
+              fs: fs,
+              icon: Icons.person_remove_outlined,
+              label: 'Удалить из группы',
+              color: const Color(0xFFF87171),
+              onTap: () async {
+                Navigator.pop(ctx);
+                final ok = await _confirmRemove(m);
+                if (ok == true) {
+                  await _removeMember(m);
+                }
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _sheetAction({required BuildContext ctx, required double fs, required IconData icon, required String label, required Color color, required VoidCallback onTap}) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: EdgeInsets.symmetric(horizontal: fs * 0.045, vertical: fs * 0.038),
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: 0.08),
+          borderRadius: BorderRadius.circular(fs * 0.04),
+          border: Border.all(color: color.withValues(alpha: 0.3)),
+        ),
+        child: Row(
+          children: [
+            Icon(icon, color: color, size: fs * 0.055),
+            SizedBox(width: fs * 0.035),
+            Text(
+              label,
+              style: TextStyle(color: color, fontSize: fs * 0.038, fontWeight: FontWeight.w600),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _changeRole(GroupMember m) async {
+    final fs = MediaQuery.of(context).size.width.clamp(320.0, 430.0);
+    final newRole = m.role == 'admin' ? 'member' : 'admin';
+    final newRoleLabel = newRole == 'admin' ? 'Администратора' : 'Участника';
+    final name = m.fullName.isNotEmpty ? m.fullName : m.email ?? 'Пользователь';
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF10232C),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(fs * 0.04)),
+        title: Text(
+          'Изменить роль?',
+          style: TextStyle(color: Colors.white, fontSize: fs * 0.045),
+        ),
+        content: Text(
+          '$name будет назначен(а) $newRoleLabel.',
+          style: TextStyle(color: const Color(0xFF7D92B1), fontSize: fs * 0.035),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: Text(
+              'Отмена',
+              style: TextStyle(color: const Color(0xFF7D92B1), fontSize: fs * 0.036),
+            ),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text(
+              newRole == 'admin' ? 'Назначить админом' : 'Сделать участником',
+              style: TextStyle(color: newRole == 'admin' ? const Color(0xFFFACC15) : const Color(0xFF0D59F2), fontSize: fs * 0.036, fontWeight: FontWeight.w700),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) {
+      return;
+    }
+
+    setState(() => _isLoading = true);
+    final res = await GroupService.changeRole(m.userId, newRole);
+    if (mounted) {
+      if (res.success) {
+        await _load();
+      } else {
+        setState(() => _isLoading = false);
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(res.error ?? 'Ошибка')));
       }
     }
   }
@@ -870,13 +1203,18 @@ class _MyGroupScreenState extends State<_MyGroupScreen> {
       context: context,
       builder: (ctx) => _InviteDialog(initialRole: initialRole),
     );
-    if (result == null || result.email.isEmpty) return;
+    if (result == null || result.email.isEmpty) {
+      return;
+    }
+    if (!mounted) {
+      return;
+    }
 
     setState(() => _isLoading = true);
     final res = await GroupService.sendInvitation(email: result.email, role: result.role);
     if (mounted) {
       setState(() => _isLoading = false);
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(res.success ? 'Приглашение отправлено' : (res.error ?? 'Ошибка')), backgroundColor: const Color(0xFF10232C)));
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(res.success ? 'Приглашение отправлено' : (res.error ?? 'Ошибка'))));
     }
   }
 
@@ -901,11 +1239,12 @@ class _MyGroupScreenState extends State<_MyGroupScreen> {
           onPressed: () => Navigator.pop(context),
         ),
         actions: [
-          IconButton(
-            icon: Icon(Icons.person_add_outlined, color: const Color(0xFF0D59F2), size: fs * 0.055),
-            onPressed: _addMember,
-            tooltip: 'Пригласить',
-          ),
+          if (_canManage)
+            IconButton(
+              icon: Icon(Icons.person_add_outlined, color: const Color(0xFF0D59F2), size: fs * 0.055),
+              onPressed: _addMember,
+              tooltip: 'Пригласить',
+            ),
           if (_isOwner)
             IconButton(
               icon: Icon(Icons.delete_outline_rounded, color: const Color(0xFFF87171), size: fs * 0.055),
@@ -955,83 +1294,90 @@ class _MyGroupScreenState extends State<_MyGroupScreen> {
                       physics: const AlwaysScrollableScrollPhysics(),
                       padding: EdgeInsets.symmetric(horizontal: w * 0.04, vertical: w * 0.04),
                       itemCount: _members.length,
-                      separatorBuilder: (_, __) => const SizedBox(height: 10),
+                      separatorBuilder: (_, _) => const SizedBox(height: 10),
                       itemBuilder: (_, i) {
                         final m = _members[i];
                         final initials = _initials(m.fullName.isNotEmpty ? m.fullName : (m.email ?? '?'));
-                        return Container(
-                          padding: EdgeInsets.all(fs * 0.04),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFF10232C),
-                            borderRadius: BorderRadius.circular(fs * 0.04),
-                            border: Border.all(color: const Color(0xFF455664), width: 1),
-                          ),
-                          child: Row(
-                            children: [
-                              Container(
-                                width: fs * 0.12,
-                                height: fs * 0.12,
-                                decoration: BoxDecoration(
-                                  shape: BoxShape.circle,
-                                  color: const Color(0xFF0D59F2),
-                                  image: m.avatarUrl != null ? DecorationImage(image: NetworkImage(m.avatarUrl!), fit: BoxFit.cover) : null,
+                        final canManageThis = _isOwner && !m.isOwner;
+                        return GestureDetector(
+                          onTap: canManageThis ? () => _showMemberSheet(m) : null,
+                          child: Container(
+                            padding: EdgeInsets.all(fs * 0.04),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF10232C),
+                              borderRadius: BorderRadius.circular(fs * 0.04),
+                              border: Border.all(color: const Color(0xFF455664), width: 1),
+                            ),
+                            child: Row(
+                              children: [
+                                Container(
+                                  width: fs * 0.12,
+                                  height: fs * 0.12,
+                                  decoration: BoxDecoration(
+                                    shape: BoxShape.circle,
+                                    color: const Color(0xFF0D59F2),
+                                    image: m.avatarUrl != null ? DecorationImage(image: NetworkImage(m.avatarUrl!), fit: BoxFit.cover) : null,
+                                  ),
+                                  child: m.avatarUrl == null
+                                      ? Center(
+                                          child: Text(
+                                            initials,
+                                            style: TextStyle(color: Colors.white, fontSize: fs * 0.04, fontWeight: FontWeight.bold),
+                                          ),
+                                        )
+                                      : null,
                                 ),
-                                child: m.avatarUrl == null
-                                    ? Center(
-                                        child: Text(
-                                          initials,
-                                          style: TextStyle(color: Colors.white, fontSize: fs * 0.04, fontWeight: FontWeight.bold),
-                                        ),
-                                      )
-                                    : null,
-                              ),
-                              SizedBox(width: fs * 0.03),
-                              Expanded(
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Text(
-                                      m.fullName.isNotEmpty ? m.fullName : m.email ?? '—',
-                                      style: TextStyle(color: Colors.white, fontSize: fs * 0.038, fontWeight: FontWeight.w600),
-                                    ),
-                                    if (m.email != null && m.fullName.isNotEmpty)
+                                SizedBox(width: fs * 0.03),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
                                       Text(
-                                        m.email!,
-                                        style: TextStyle(color: const Color(0xFF7D92B1), fontSize: fs * 0.03),
+                                        m.fullName.isNotEmpty ? m.fullName : m.email ?? '—',
+                                        style: TextStyle(color: Colors.white, fontSize: fs * 0.038, fontWeight: FontWeight.w600),
                                       ),
-                                    SizedBox(height: 4),
-                                    Row(children: [_badge(fs, m.isOwner ? 'Владелец' : 'Участник', m.isOwner ? const Color(0xFF0D59F2) : const Color(0xFF455664))]),
-                                  ],
+                                      if (m.email != null && m.fullName.isNotEmpty)
+                                        Text(
+                                          m.email!,
+                                          style: TextStyle(color: const Color(0xFF7D92B1), fontSize: fs * 0.03),
+                                        ),
+                                      SizedBox(height: 4),
+                                      Row(children: [_badge(fs, m.isOwner ? 'Владелец' : (m.role == 'admin' ? 'Администратор' : 'Участник'), m.isOwner ? const Color(0xFF0D59F2) : (m.role == 'admin' ? const Color(0xFFFACC15) : const Color(0xFF455664)))]),
+                                    ],
+                                  ),
                                 ),
-                              ),
-                            ],
+                                if (canManageThis) Icon(Icons.more_vert_rounded, color: const Color(0xFF455664), size: fs * 0.05),
+                              ],
+                            ),
                           ),
                         );
                       },
                     ),
             ),
-      bottomNavigationBar: Padding(
-        padding: EdgeInsets.fromLTRB(w * 0.04, 0, w * 0.04, MediaQuery.of(context).padding.bottom + 16),
-        child: ElevatedButton.icon(
-          onPressed: _addMember,
-          icon: const Icon(Icons.person_add_outlined),
-          label: const Text('Добавить пользователя'),
-          style: ElevatedButton.styleFrom(
-            backgroundColor: const Color(0xFF0D59F2),
-            foregroundColor: Colors.white,
-            padding: const EdgeInsets.symmetric(vertical: 14),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(fs * 0.04)),
-            textStyle: TextStyle(fontSize: fs * 0.04, fontWeight: FontWeight.w600),
-          ),
-        ),
-      ),
+      bottomNavigationBar: _canManage
+          ? Padding(
+              padding: EdgeInsets.fromLTRB(w * 0.04, 0, w * 0.04, MediaQuery.of(context).padding.bottom + 16),
+              child: ElevatedButton.icon(
+                onPressed: _addMember,
+                icon: const Icon(Icons.person_add_outlined),
+                label: const Text('Добавить пользователя'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF0D59F2),
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(fs * 0.04)),
+                  textStyle: TextStyle(fontSize: fs * 0.04, fontWeight: FontWeight.w600),
+                ),
+              ),
+            )
+          : null,
     );
   }
 
   Widget _badge(double fs, String label, Color color) {
     return Container(
       padding: EdgeInsets.symmetric(horizontal: fs * 0.025, vertical: 2),
-      decoration: BoxDecoration(color: color.withOpacity(0.15), borderRadius: BorderRadius.circular(fs * 0.04)),
+      decoration: BoxDecoration(color: color.withValues(alpha: 0.15), borderRadius: BorderRadius.circular(fs * 0.04)),
       child: Text(
         label,
         style: TextStyle(color: color, fontSize: fs * 0.026, fontWeight: FontWeight.w600),
@@ -1041,8 +1387,12 @@ class _MyGroupScreenState extends State<_MyGroupScreen> {
 
   String _initials(String name) {
     final parts = name.trim().split(' ');
-    if (parts.isEmpty || parts.first.isEmpty) return '?';
-    if (parts.length == 1) return parts[0][0].toUpperCase();
+    if (parts.isEmpty || parts.first.isEmpty) {
+      return '?';
+    }
+    if (parts.length == 1) {
+      return parts[0][0].toUpperCase();
+    }
     return '${parts[0][0]}${parts[1][0]}'.toUpperCase();
   }
 }
@@ -1090,10 +1440,11 @@ class _EditProfileScreenState extends State<_EditProfileScreen> {
     final result = await AuthService.updateProfile(firstName: _firstNameCtrl.text, lastName: _lastNameCtrl.text);
     if (mounted) {
       setState(() => _isSaving = false);
-      if (result.success)
+      if (result.success) {
         Navigator.pop(context, true);
-      else
+      } else {
         setState(() => _error = result.error);
+      }
     }
   }
 
@@ -1242,9 +1593,10 @@ class _ChangePasswordScreenState extends State<_ChangePasswordScreen> {
       setState(() => _isSaving = false);
       if (result.success) {
         Navigator.pop(context);
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Пароль изменён'), backgroundColor: Color(0xFF10232C)));
-      } else
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Пароль изменён')));
+      } else {
         setState(() => _error = result.error);
+      }
     }
   }
 
@@ -1427,7 +1779,7 @@ class _InviteDialogState extends State<_InviteDialog> {
                   child: Container(
                     padding: EdgeInsets.symmetric(vertical: fs * 0.025),
                     decoration: BoxDecoration(
-                      color: _role == 'member' ? const Color(0xFF0D59F2).withOpacity(0.15) : const Color(0xFF152028),
+                      color: _role == 'member' ? const Color(0xFF0D59F2).withValues(alpha: 0.15) : const Color(0xFF152028),
                       borderRadius: BorderRadius.circular(fs * 0.03),
                       border: Border.all(color: _role == 'member' ? const Color(0xFF0D59F2) : const Color(0xFF455664)),
                     ),
@@ -1451,7 +1803,7 @@ class _InviteDialogState extends State<_InviteDialog> {
                   child: Container(
                     padding: EdgeInsets.symmetric(vertical: fs * 0.025),
                     decoration: BoxDecoration(
-                      color: _role == 'admin' ? const Color(0xFFFACC15).withOpacity(0.15) : const Color(0xFF152028),
+                      color: _role == 'admin' ? const Color(0xFFFACC15).withValues(alpha: 0.15) : const Color(0xFF152028),
                       borderRadius: BorderRadius.circular(fs * 0.03),
                       border: Border.all(color: _role == 'admin' ? const Color(0xFFFACC15) : const Color(0xFF455664)),
                     ),
@@ -1502,9 +1854,7 @@ class _TextInputDialog extends StatefulWidget {
   final String hint;
   final String confirmLabel;
   final IconData icon;
-  final TextInputType keyboardType;
-
-  const _TextInputDialog({required this.title, required this.hint, required this.confirmLabel, required this.icon, this.keyboardType = TextInputType.text});
+  const _TextInputDialog({required this.title, required this.hint, required this.confirmLabel, required this.icon});
 
   @override
   State<_TextInputDialog> createState() => _TextInputDialogState();
@@ -1544,7 +1894,7 @@ class _TextInputDialogState extends State<_TextInputDialog> {
         child: TextField(
           controller: _ctrl,
           autofocus: true,
-          keyboardType: widget.keyboardType,
+          keyboardType: TextInputType.text,
           style: TextStyle(color: Colors.white, fontSize: fs * 0.038),
           decoration: InputDecoration(
             hintText: widget.hint,
