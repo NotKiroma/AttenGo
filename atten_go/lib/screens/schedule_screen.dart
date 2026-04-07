@@ -4,6 +4,7 @@ import '../services/schedule_service.dart';
 import '../services/announcement_service.dart';
 import '../services/attendance_service.dart';
 import '../services/realtime_service.dart';
+import '../utils/app_snackbar.dart';
 
 class ScheduleScreen extends StatefulWidget {
   final bool canEdit; // может ли добавлять/редактировать пары
@@ -230,7 +231,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
                           child: Container(
                             padding: EdgeInsets.symmetric(horizontal: fs * 0.032, vertical: fs * 0.018),
                             decoration: BoxDecoration(
-                              gradient: LinearGradient(colors: [const Color(0xFFF87171).withValues(alpha: 0.15), const Color(0xFFFACC15).withValues(alpha: 0.12)]),
+                              color: const Color(0xFFF87171).withValues(alpha: 0.15),
                               borderRadius: BorderRadius.circular(fs * 0.035),
                               border: Border.all(color: const Color(0xFFF87171).withValues(alpha: 0.5)),
                             ),
@@ -258,202 +259,85 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
 
   Future<void> _showLessonActions(Lesson lesson, int index) async {
     final fs = MediaQuery.of(context).size.width.clamp(320.0, 430.0);
-    final date = AttendanceService.todayDate();
-    final lessonKey = AttendanceService.lessonKey(lesson.timeStart, lesson.timeEnd);
-    // Проверяем отменена ли уже эта пара или весь день
-    final alreadyCancelled = await AnnouncementService.isCancelled(date: date, lessonKey: lessonKey);
-    final dayAlreadyCancelled = await AnnouncementService.isCancelled(date: date, lessonKey: 'all');
-    final canCancel = !alreadyCancelled && !dayAlreadyCancelled;
     if (!mounted) return;
 
+    // Показываем шторку СРАЗУ, статус отмены загружаем внутри
     showModalBottomSheet(
       context: context,
       backgroundColor: Colors.transparent,
-      builder: (ctx) => Container(
-        decoration: const BoxDecoration(
-          color: Color(0xFF152028),
-          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-        ),
-        padding: EdgeInsets.fromLTRB(fs * 0.05, fs * 0.035, fs * 0.05, fs * 0.06),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            // Handle
-            Center(
-              child: Container(
-                width: fs * 0.1,
-                height: 4,
-                margin: EdgeInsets.only(bottom: fs * 0.035),
-                decoration: BoxDecoration(color: const Color(0xFF455664), borderRadius: BorderRadius.circular(2)),
-              ),
-            ),
-
-            // Заголовок пары
-            Container(
-              padding: EdgeInsets.all(fs * 0.04),
-              decoration: BoxDecoration(
-                color: const Color(0xFF10232C),
-                borderRadius: BorderRadius.circular(fs * 0.04),
-                border: Border.all(color: const Color(0xFF455664)),
-              ),
-              child: Row(
-                children: [
-                  Container(
-                    width: fs * 0.11,
-                    height: fs * 0.11,
-                    decoration: BoxDecoration(color: const Color(0xFF0D59F2).withValues(alpha: 0.12), borderRadius: BorderRadius.circular(fs * 0.035)),
-                    child: Icon(Icons.book_outlined, color: const Color(0xFF0D59F2), size: fs * 0.05),
-                  ),
-                  SizedBox(width: fs * 0.035),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          lesson.subject,
-                          style: TextStyle(color: Colors.white, fontSize: fs * 0.04, fontWeight: FontWeight.bold),
-                        ),
-                        SizedBox(height: 3),
-                        Row(
-                          children: [
-                            Icon(Icons.access_time_rounded, color: const Color(0xFF7D92B1), size: fs * 0.035),
-                            SizedBox(width: 4),
-                            Text(
-                              '${lesson.timeStart} – ${lesson.timeEnd}',
-                              style: TextStyle(color: const Color(0xFF7D92B1), fontSize: fs * 0.031),
-                            ),
-                            if (lesson.room.isNotEmpty) ...[
-                              SizedBox(width: fs * 0.02),
-                              Icon(Icons.location_on_outlined, color: const Color(0xFF7D92B1), size: fs * 0.035),
-                              SizedBox(width: 2),
-                              Text(
-                                lesson.room,
-                                style: TextStyle(color: const Color(0xFF7D92B1), fontSize: fs * 0.031),
-                              ),
-                            ],
-                          ],
-                        ),
-                        if (alreadyCancelled || dayAlreadyCancelled) ...[
-                          SizedBox(height: 6),
-                          Container(
-                            padding: EdgeInsets.symmetric(horizontal: fs * 0.025, vertical: 3),
-                            decoration: BoxDecoration(color: const Color(0xFFF87171).withValues(alpha: 0.12), borderRadius: BorderRadius.circular(fs * 0.02)),
-                            child: Text(
-                              dayAlreadyCancelled ? 'День уже отменён' : 'Пара уже отменена',
-                              style: TextStyle(color: const Color(0xFFF87171), fontSize: fs * 0.026, fontWeight: FontWeight.w600),
-                            ),
-                          ),
-                        ],
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            SizedBox(height: fs * 0.03),
-
-            // Редактировать
-            _lessonActionTile(
-              ctx,
-              fs,
-              icon: Icons.edit_outlined,
-              label: 'Редактировать',
-              iconBg: const Color(0xFF0D59F2),
-              textColor: Colors.white,
-              onTap: () {
-                Navigator.pop(ctx);
-                _editLesson(index);
-              },
-            ),
-            SizedBox(height: fs * 0.015),
-
-            // Отменить пару (только если не отменена)
-            _lessonActionTile(
-              ctx,
-              fs,
-              icon: Icons.do_not_disturb_on_outlined,
-              label: 'Отменить пару',
-              sub: canCancel ? 'Участники получат уведомление' : (dayAlreadyCancelled ? 'День уже отменён' : 'Пара уже отменена'),
-              iconBg: const Color(0xFFF87171),
-              textColor: canCancel ? Colors.white : const Color(0xFF455664),
-              disabled: !canCancel,
-              onTap: canCancel
-                  ? () {
-                      Navigator.pop(ctx);
-                      _cancelLesson(lesson);
-                    }
-                  : () {},
-            ),
-            SizedBox(height: fs * 0.015),
-
-            // Удалить
-            _lessonActionTile(
-              ctx,
-              fs,
-              icon: Icons.delete_outline_rounded,
-              label: 'Удалить из расписания',
-              iconBg: const Color(0xFF455664),
-              textColor: const Color(0xFF7D92B1),
-              onTap: () {
-                Navigator.pop(ctx);
-                _deleteLesson(index);
-              },
-            ),
-          ],
-        ),
+      builder: (ctx) => _LessonActionsSheet(
+        lesson: lesson,
+        index: index,
+        fs: fs,
+        onEdit: () {
+          Navigator.pop(ctx);
+          _editLesson(index);
+        },
+        onCancel: () {
+          Navigator.pop(ctx);
+          _cancelLesson(lesson);
+        },
+        onDelete: () {
+          Navigator.pop(ctx);
+          _deleteLesson(index);
+        },
       ),
     );
   }
 
-  Widget _lessonActionTile(BuildContext ctx, double fs, {required IconData icon, required String label, String? sub, required Color iconBg, required Color textColor, bool disabled = false, required VoidCallback onTap}) {
-    return GestureDetector(
-      onTap: disabled ? null : onTap,
-      child: Container(
-        padding: EdgeInsets.symmetric(horizontal: fs * 0.04, vertical: fs * 0.03),
-        decoration: BoxDecoration(
-          color: disabled ? const Color(0xFF0A1A22) : const Color(0xFF10232C),
-          borderRadius: BorderRadius.circular(fs * 0.04),
-          border: Border.all(color: disabled ? const Color(0xFF2A3A44) : const Color(0xFF455664)),
-        ),
-        child: Row(
-          children: [
-            Container(
-              padding: EdgeInsets.all(fs * 0.022),
-              decoration: BoxDecoration(color: (disabled ? const Color(0xFF455664) : iconBg).withValues(alpha: 0.15), borderRadius: BorderRadius.circular(fs * 0.03)),
-              child: Icon(icon, color: disabled ? const Color(0xFF455664) : iconBg, size: fs * 0.045),
-            ),
-            SizedBox(width: fs * 0.03),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    label,
-                    style: TextStyle(color: disabled ? const Color(0xFF455664) : textColor, fontSize: fs * 0.036, fontWeight: FontWeight.w600),
-                  ),
-                  if (sub != null) ...[
-                    SizedBox(height: 2),
-                    Text(
-                      sub,
-                      style: TextStyle(color: disabled ? const Color(0xFF2A3A44) : const Color(0xFF7D92B1), fontSize: fs * 0.028),
-                    ),
-                  ],
-                ],
-              ),
-            ),
-            if (!disabled) Icon(Icons.chevron_right_rounded, color: const Color(0xFF455664), size: fs * 0.045),
-          ],
-        ),
-      ),
-    );
-  }
+  // Widget _lessonActionTile(BuildContext ctx, double fs, {required IconData icon, required String label, String? sub, required Color iconBg, required Color textColor, bool disabled = false, required VoidCallback onTap}) {
+  //   return GestureDetector(
+  //     onTap: disabled ? null : onTap,
+  //     child: Container(
+  //       padding: EdgeInsets.symmetric(horizontal: fs * 0.04, vertical: fs * 0.03),
+  //       decoration: BoxDecoration(
+  //         color: disabled ? const Color(0xFF0A1A22) : const Color(0xFF10232C),
+  //         borderRadius: BorderRadius.circular(fs * 0.04),
+  //         border: Border.all(color: disabled ? const Color(0xFF2A3A44) : const Color(0xFF455664)),
+  //       ),
+  //       child: Row(
+  //         children: [
+  //           Container(
+  //             padding: EdgeInsets.all(fs * 0.022),
+  //             decoration: BoxDecoration(color: (disabled ? const Color(0xFF455664) : iconBg).withValues(alpha: 0.15), borderRadius: BorderRadius.circular(fs * 0.03)),
+  //             child: Icon(icon, color: disabled ? const Color(0xFF455664) : iconBg, size: fs * 0.045),
+  //           ),
+  //           SizedBox(width: fs * 0.03),
+  //           Expanded(
+  //             child: Column(
+  //               crossAxisAlignment: CrossAxisAlignment.start,
+  //               children: [
+  //                 Text(
+  //                   label,
+  //                   style: TextStyle(color: disabled ? const Color(0xFF455664) : textColor, fontSize: fs * 0.036, fontWeight: FontWeight.w600),
+  //                 ),
+  //                 if (sub != null) ...[
+  //                   SizedBox(height: 2),
+  //                   Text(
+  //                     sub,
+  //                     style: TextStyle(color: disabled ? const Color(0xFF2A3A44) : const Color(0xFF7D92B1), fontSize: fs * 0.028),
+  //                   ),
+  //                 ],
+  //               ],
+  //             ),
+  //           ),
+  //           if (!disabled) Icon(Icons.chevron_right_rounded, color: const Color(0xFF455664), size: fs * 0.045),
+  //         ],
+  //       ),
+  //     ),
+  //   );
+  // }
 
   Future<void> _cancelLesson(Lesson lesson) async {
     final date = AttendanceService.todayDate();
     final lessonKey = AttendanceService.lessonKey(lesson.timeStart, lesson.timeEnd);
     final res = await AnnouncementService.create(title: '«${lesson.subject}» отменена', body: '${lesson.timeStart}–${lesson.timeEnd} пара не состоится', isCancel: true, cancelDate: date, cancelKey: lessonKey);
     if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(res.success ? 'Пара отменена, участники уведомлены' : (res.error ?? 'Ошибка'))));
+      if (res.success) {
+        AppSnackBar.success(context, 'Пара отменена, участники уведомлены');
+      } else {
+        AppSnackBar.error(context, res.error ?? 'Ошибка');
+      }
     }
   }
 
@@ -466,7 +350,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
     if (!mounted) return;
 
     if (alreadyCancelled) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('День уже отменён')));
+      AppSnackBar.warning(context, 'День уже отменён');
       return;
     }
 
@@ -505,7 +389,11 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
 
     final res = await AnnouncementService.create(title: 'Все пары отменены', body: 'Сегодня занятий нет', isCancel: true, cancelDate: date, cancelKey: 'all');
     if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(res.success ? 'День отменён, участники уведомлены' : (res.error ?? 'Ошибка'))));
+      if (res.success) {
+        AppSnackBar.success(context, 'День отменён, участники уведомлены');
+      } else {
+        AppSnackBar.error(context, res.error ?? 'Ошибка');
+      }
     }
   }
 
@@ -772,6 +660,205 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
             style: TextStyle(color: isActive ? Colors.white.withValues(alpha: 0.75) : const Color(0xFF7D92B1), fontSize: fs * 0.026, fontWeight: FontWeight.w400),
           ),
         ],
+      ),
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ШТОРКА ДЕЙСТВИЙ НАД ПАРОЙ — загружает статус отмены асинхронно
+// ═══════════════════════════════════════════════════════════════════════════════
+
+class _LessonActionsSheet extends StatefulWidget {
+  final Lesson lesson;
+  final int index;
+  final double fs;
+  final VoidCallback onEdit;
+  final VoidCallback onCancel;
+  final VoidCallback onDelete;
+
+  const _LessonActionsSheet({required this.lesson, required this.index, required this.fs, required this.onEdit, required this.onCancel, required this.onDelete});
+
+  @override
+  State<_LessonActionsSheet> createState() => _LessonActionsSheetState();
+}
+
+class _LessonActionsSheetState extends State<_LessonActionsSheet> {
+  bool _loading = true;
+  bool _alreadyCancelled = false;
+  bool _dayAlreadyCancelled = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadCancelStatus();
+  }
+
+  Future<void> _loadCancelStatus() async {
+    final date = AttendanceService.todayDate();
+    final lessonKey = AttendanceService.lessonKey(widget.lesson.timeStart, widget.lesson.timeEnd);
+    final cancelledKeys = await AnnouncementService.getCancelledLessonKeys(date: date);
+    if (mounted) {
+      setState(() {
+        _alreadyCancelled = cancelledKeys.contains(lessonKey);
+        _dayAlreadyCancelled = cancelledKeys.contains('all');
+        _loading = false;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final fs = widget.fs;
+    final lesson = widget.lesson;
+    final canCancel = !_loading && !_alreadyCancelled && !_dayAlreadyCancelled;
+
+    return Container(
+      decoration: const BoxDecoration(
+        color: Color(0xFF152028),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      padding: EdgeInsets.fromLTRB(fs * 0.05, fs * 0.035, fs * 0.05, fs * 0.06),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Handle
+          Center(
+            child: Container(
+              width: fs * 0.1,
+              height: 4,
+              margin: EdgeInsets.only(bottom: fs * 0.035),
+              decoration: BoxDecoration(color: const Color(0xFF455664), borderRadius: BorderRadius.circular(2)),
+            ),
+          ),
+
+          // Заголовок пары
+          Container(
+            padding: EdgeInsets.all(fs * 0.04),
+            decoration: BoxDecoration(
+              color: const Color(0xFF10232C),
+              borderRadius: BorderRadius.circular(fs * 0.04),
+              border: Border.all(color: const Color(0xFF455664)),
+            ),
+            child: Row(
+              children: [
+                Container(
+                  width: fs * 0.11,
+                  height: fs * 0.11,
+                  decoration: BoxDecoration(color: const Color(0xFF0D59F2).withValues(alpha: 0.12), borderRadius: BorderRadius.circular(fs * 0.035)),
+                  child: Icon(Icons.book_outlined, color: const Color(0xFF0D59F2), size: fs * 0.05),
+                ),
+                SizedBox(width: fs * 0.035),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        lesson.subject,
+                        style: TextStyle(color: Colors.white, fontSize: fs * 0.04, fontWeight: FontWeight.bold),
+                      ),
+                      SizedBox(height: 3),
+                      Row(
+                        children: [
+                          Icon(Icons.access_time_rounded, color: const Color(0xFF7D92B1), size: fs * 0.035),
+                          SizedBox(width: 4),
+                          Text(
+                            '${lesson.timeStart} – ${lesson.timeEnd}',
+                            style: TextStyle(color: const Color(0xFF7D92B1), fontSize: fs * 0.031),
+                          ),
+                          if (lesson.room.isNotEmpty) ...[
+                            SizedBox(width: fs * 0.02),
+                            Icon(Icons.location_on_outlined, color: const Color(0xFF7D92B1), size: fs * 0.035),
+                            SizedBox(width: 2),
+                            Text(
+                              lesson.room,
+                              style: TextStyle(color: const Color(0xFF7D92B1), fontSize: fs * 0.031),
+                            ),
+                          ],
+                        ],
+                      ),
+                      if (!_loading && (_alreadyCancelled || _dayAlreadyCancelled)) ...[
+                        SizedBox(height: 6),
+                        Container(
+                          padding: EdgeInsets.symmetric(horizontal: fs * 0.025, vertical: 3),
+                          decoration: BoxDecoration(color: const Color(0xFFF87171).withValues(alpha: 0.12), borderRadius: BorderRadius.circular(fs * 0.02)),
+                          child: Text(
+                            _dayAlreadyCancelled ? 'День уже отменён' : 'Пара уже отменена',
+                            style: TextStyle(color: const Color(0xFFF87171), fontSize: fs * 0.026, fontWeight: FontWeight.w600),
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+          SizedBox(height: fs * 0.03),
+
+          // Редактировать
+          _actionTile(fs, icon: Icons.edit_outlined, label: 'Редактировать', iconBg: const Color(0xFF0D59F2), textColor: Colors.white, onTap: widget.onEdit),
+          SizedBox(height: fs * 0.015),
+
+          // Отменить пару
+          _actionTile(
+            fs,
+            icon: Icons.do_not_disturb_on_outlined,
+            label: 'Отменить пару',
+            sub: _loading ? 'Загрузка...' : (canCancel ? 'Участники получат уведомление' : (_dayAlreadyCancelled ? 'День уже отменён' : 'Пара уже отменена')),
+            iconBg: const Color(0xFFF87171),
+            textColor: canCancel ? Colors.white : const Color(0xFF455664),
+            disabled: !canCancel,
+            onTap: canCancel ? widget.onCancel : () {},
+          ),
+          SizedBox(height: fs * 0.015),
+
+          // Удалить
+          _actionTile(fs, icon: Icons.delete_outline_rounded, label: 'Удалить из расписания', iconBg: const Color(0xFF455664), textColor: const Color(0xFF7D92B1), onTap: widget.onDelete),
+        ],
+      ),
+    );
+  }
+
+  Widget _actionTile(double fs, {required IconData icon, required String label, String? sub, required Color iconBg, required Color textColor, bool disabled = false, required VoidCallback onTap}) {
+    return GestureDetector(
+      onTap: disabled ? null : onTap,
+      child: Container(
+        padding: EdgeInsets.symmetric(horizontal: fs * 0.04, vertical: fs * 0.03),
+        decoration: BoxDecoration(
+          color: disabled ? const Color(0xFF0A1A22) : const Color(0xFF10232C),
+          borderRadius: BorderRadius.circular(fs * 0.04),
+          border: Border.all(color: disabled ? const Color(0xFF2A3A44) : const Color(0xFF455664)),
+        ),
+        child: Row(
+          children: [
+            Container(
+              padding: EdgeInsets.all(fs * 0.022),
+              decoration: BoxDecoration(color: (disabled ? const Color(0xFF455664) : iconBg).withValues(alpha: 0.15), borderRadius: BorderRadius.circular(fs * 0.03)),
+              child: Icon(icon, color: disabled ? const Color(0xFF455664) : iconBg, size: fs * 0.045),
+            ),
+            SizedBox(width: fs * 0.03),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    label,
+                    style: TextStyle(color: disabled ? const Color(0xFF455664) : textColor, fontSize: fs * 0.036, fontWeight: FontWeight.w600),
+                  ),
+                  if (sub != null) ...[
+                    SizedBox(height: 2),
+                    Text(
+                      sub,
+                      style: TextStyle(color: disabled ? const Color(0xFF2A3A44) : const Color(0xFF7D92B1), fontSize: fs * 0.028),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            if (!disabled) Icon(Icons.chevron_right_rounded, color: const Color(0xFF455664), size: fs * 0.045),
+          ],
+        ),
       ),
     );
   }

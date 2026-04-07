@@ -1,13 +1,14 @@
+// lib/services/db_service.dart
 import 'package:supabase_flutter/supabase_flutter.dart';
+import '../core/env.dart';
 
 class DatabaseService {
-  static const _url = 'https://hiidpfgcsljombikrhvy.supabase.co';
-  static const _anonKey = 'sb_publishable_U4kAvFaV9UkOkUiL2qtujw__FIT_DKH';
+  DatabaseService._();
 
-  /// Единственная точка инициализации Supabase.
-  /// Вызывается в main.dart.
+  /// Инициализация Supabase. Вызывается один раз в main().
+  /// URL и ключ берутся из обфусцированного .env (envied).
   static Future<void> init() async {
-    await Supabase.initialize(url: _url, anonKey: _anonKey);
+    await Supabase.initialize(url: Env.supabaseUrl, anonKey: Env.supabaseAnonKey);
   }
 
   static SupabaseClient get client => Supabase.instance.client;

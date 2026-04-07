@@ -2,208 +2,109 @@ import 'dart:async';
 import 'dart:developer' as developer;
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'db_service.dart';
-import 'group_service.dart';
+import '../local/sync_service.dart';
+import 'auth_service.dart';
 
-/// Централизованный сервис Realtime-подписок.
-///
-/// Подписывается на все таблицы один раз и рассылает события
-/// через стримы. Экраны слушают нужные стримы и обновляются.
-///
-/// Использование:
-///   RealtimeService.init();  // в main.dart или MainScreen.initState
-///   RealtimeService.onScheduleChanged.listen((_) => _refresh());
-///   RealtimeService.dispose(); // при выходе
 class RealtimeService {
   RealtimeService._();
 
-  // ── Стрим-контроллеры (broadcast — несколько слушателей) ──
   static final _scheduleCtrl = StreamController<void>.broadcast();
   static final _studentsCtrl = StreamController<void>.broadcast();
-  static final _attendanceLessonsCtrl = StreamController<void>.broadcast();
   static final _attendanceRecordsCtrl = StreamController<void>.broadcast();
-  static final _groupMembersCtrl = StreamController<void>.broadcast();
-  static final _announcementsCtrl = StreamController<void>.broadcast();
+  static final _attendanceLessonsCtrl = StreamController<void>.broadcast(); // Добавлено
   static final _notificationsCtrl = StreamController<void>.broadcast();
   static final _invitationsCtrl = StreamController<void>.broadcast();
-  static final _profilesCtrl = StreamController<void>.broadcast();
-  static final _groupsCtrl = StreamController<void>.broadcast();
+  static final _groupMembersCtrl = StreamController<void>.broadcast(); // Добавлено
+  static final _groupsCtrl = StreamController<void>.broadcast(); // Добавлено
+  static final _announcementsCtrl = StreamController<void>.broadcast(); // Добавлено
 
-  // ── Публичные стримы для экранов ──
   static Stream<void> get onScheduleChanged => _scheduleCtrl.stream;
   static Stream<void> get onStudentsChanged => _studentsCtrl.stream;
-  static Stream<void> get onAttendanceLessonsChanged => _attendanceLessonsCtrl.stream;
   static Stream<void> get onAttendanceRecordsChanged => _attendanceRecordsCtrl.stream;
-  static Stream<void> get onGroupMembersChanged => _groupMembersCtrl.stream;
-  static Stream<void> get onAnnouncementsChanged => _announcementsCtrl.stream;
+  static Stream<void> get onAttendanceLessonsChanged => _attendanceLessonsCtrl.stream;
   static Stream<void> get onNotificationsChanged => _notificationsCtrl.stream;
   static Stream<void> get onInvitationsChanged => _invitationsCtrl.stream;
-  static Stream<void> get onProfilesChanged => _profilesCtrl.stream;
+  static Stream<void> get onGroupMembersChanged => _groupMembersCtrl.stream;
   static Stream<void> get onGroupsChanged => _groupsCtrl.stream;
+  static Stream<void> get onAnnouncementsChanged => _announcementsCtrl.stream;
 
-  /// Комбинированный стрим — любое изменение посещаемости
-  static Stream<void> get onAttendanceChanged =>
-      StreamGroup.merge([_attendanceLessonsCtrl.stream, _attendanceRecordsCtrl.stream]);
-
-  // ── Внутреннее состояние ──
   static RealtimeChannel? _channel;
-  static bool _initialized = false;
+  static final Map<String, Future<void>> _syncQueues = {};
 
-  // Debounce таймеры (чтобы не дёргать 10 раз за секунду)
-  static final Map<String, Timer?> _debounceTimers = {};
-
-  /// Инициализация — вызвать один раз после авторизации
   static void init() {
-    if (_initialized) return;
-    _initialized = true;
-    _subscribe();
-    developer.log('[RealtimeService] Initialized');
-  }
+    if (_channel != null) return;
 
-  /// Переподписка (вызывать при resume из background или после смены группы)
-  static void reconnect() {
-    _unsubscribe();
-    _subscribe();
-    developer.log('[RealtimeService] Reconnected');
-  }
+    _channel = DatabaseService.client.channel('public:db_changes');
 
-  /// Отписка от всего
-  static void dispose() {
-    _unsubscribe();
-    _initialized = false;
-    developer.log('[RealtimeService] Disposed');
-  }
-
-  // ── Подписка на все таблицы одним каналом ──
-  static void _subscribe() {
-    final client = DatabaseService.client;
-
-    _channel = client
-        .channel('app_realtime')
-        // Расписание
+    _channel!
         .onPostgresChanges(
           event: PostgresChangeEvent.all,
           schema: 'public',
           table: 'schedule',
-          callback: (payload) => _emit('schedule', _scheduleCtrl, payload),
+          callback: (p) => _enqueueUpdate('schedule', _scheduleCtrl, p, onSync: () => SyncService.syncSchedule(p.newRecord['group_id'])),
         )
-        // Студенты
         .onPostgresChanges(
           event: PostgresChangeEvent.all,
           schema: 'public',
           table: 'students',
-          callback: (payload) => _emit('students', _studentsCtrl, payload),
+          callback: (p) => _enqueueUpdate('students', _studentsCtrl, p, onSync: () => SyncService.syncStudents(p.newRecord['group_id'])),
         )
-        // Уроки посещаемости
         .onPostgresChanges(
           event: PostgresChangeEvent.all,
           schema: 'public',
           table: 'attendance_lessons',
-          callback: (payload) => _emit('attendance_lessons', _attendanceLessonsCtrl, payload),
+          callback: (p) => _enqueueUpdate('attendance_lessons', _attendanceLessonsCtrl, p, onSync: () => SyncService.syncAttendance(p.newRecord['group_id'])),
         )
-        // Записи посещаемости
         .onPostgresChanges(
           event: PostgresChangeEvent.all,
           schema: 'public',
           table: 'attendance_records',
-          callback: (payload) => _emit('attendance_records', _attendanceRecordsCtrl, payload),
+          callback: (p) => _enqueueUpdate(
+            'attendance_records',
+            _attendanceRecordsCtrl,
+            p,
+            onSync: () async {
+              final lessonId = p.newRecord['lesson_id'] as int;
+              final res = await DatabaseService.client.from('attendance_lessons').select('group_id').eq('id', lessonId).maybeSingle();
+              if (res != null) await SyncService.syncAttendance(res['group_id']);
+            },
+          ),
         )
-        // Участники группы
-        .onPostgresChanges(
-          event: PostgresChangeEvent.all,
-          schema: 'public',
-          table: 'group_members',
-          callback: (payload) {
-            _emit('group_members', _groupMembersCtrl, payload);
-            // Инвалидируем кеш группы при любом изменении
-            GroupService.invalidateCache();
-          },
-        )
-        // Объявления
-        .onPostgresChanges(
-          event: PostgresChangeEvent.all,
-          schema: 'public',
-          table: 'announcements',
-          callback: (payload) => _emit('announcements', _announcementsCtrl, payload),
-        )
-        // Уведомления
         .onPostgresChanges(
           event: PostgresChangeEvent.all,
           schema: 'public',
           table: 'notifications',
-          callback: (payload) => _emit('notifications', _notificationsCtrl, payload),
+          callback: (p) => _enqueueUpdate('notifications', _notificationsCtrl, p, onSync: () => SyncService.syncNotifications(AuthService.currentUserId!)),
         )
-        // Приглашения
         .onPostgresChanges(
           event: PostgresChangeEvent.all,
           schema: 'public',
-          table: 'invitations',
-          callback: (payload) => _emit('invitations', _invitationsCtrl, payload),
+          table: 'announcements',
+          callback: (p) => _enqueueUpdate('announcements', _announcementsCtrl, p, onSync: () => SyncService.syncAnnouncements(p.newRecord['group_id'])),
         )
-        // Профили
-        .onPostgresChanges(
-          event: PostgresChangeEvent.all,
-          schema: 'public',
-          table: 'profiles',
-          callback: (payload) => _emit('profiles', _profilesCtrl, payload),
-        )
-        // Группы
-        .onPostgresChanges(
-          event: PostgresChangeEvent.all,
-          schema: 'public',
-          table: 'groups',
-          callback: (payload) => _emit('groups', _groupsCtrl, payload),
-        )
-        .subscribe((status, [error]) {
-          developer.log('[RealtimeService] Channel status: $status${error != null ? ' error: $error' : ''}');
-        });
+        .subscribe();
   }
 
-  static void _unsubscribe() {
-    // Отменяем все debounce-таймеры
-    for (final timer in _debounceTimers.values) {
-      timer?.cancel();
-    }
-    _debounceTimers.clear();
+  static void reconnect() {
+    dispose();
+    init();
+  }
 
+  static void _enqueueUpdate(String table, StreamController<void> ctrl, PostgresChangePayload payload, {required Future<void> Function() onSync}) {
+    _syncQueues[table] = (_syncQueues[table] ?? Future.value()).then((_) async {
+      try {
+        await onSync();
+        if (!ctrl.isClosed) ctrl.add(null);
+      } catch (e) {
+        developer.log('[Realtime] Error: $e');
+      }
+    });
+  }
+
+  static void dispose() {
     if (_channel != null) {
       DatabaseService.client.removeChannel(_channel!);
       _channel = null;
     }
-  }
-
-  /// Debounced emit — ждём 300ms тишины перед отправкой события.
-  /// Это предотвращает 10 обновлений за секунду при batch-операциях.
-  static void _emit(String table, StreamController<void> ctrl, PostgresChangePayload payload) {
-    developer.log('[Realtime] $table ${payload.eventType}');
-
-    _debounceTimers[table]?.cancel();
-    _debounceTimers[table] = Timer(const Duration(milliseconds: 300), () {
-      if (!ctrl.isClosed) {
-        ctrl.add(null);
-      }
-    });
-  }
-}
-
-/// Простой StreamGroup.merge — объединяет несколько стримов в один.
-class StreamGroup {
-  static Stream<T> merge<T>(Iterable<Stream<T>> streams) {
-    final controller = StreamController<T>.broadcast();
-    final subscriptions = <StreamSubscription<T>>[];
-
-    for (final stream in streams) {
-      subscriptions.add(stream.listen(
-        (data) => controller.add(data),
-        onError: (e) => controller.addError(e),
-      ));
-    }
-
-    controller.onCancel = () {
-      for (final sub in subscriptions) {
-        sub.cancel();
-      }
-    };
-
-    return controller.stream;
   }
 }

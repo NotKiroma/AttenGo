@@ -83,9 +83,12 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   void dispose() {
+    // Закрываем все подписки Realtime
     for (final sub in _subs) {
       sub.cancel();
     }
+    _subs.clear();
+
     super.dispose();
   }
 
@@ -97,82 +100,120 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _refresh() => _fetchData();
 
   Future<void> _fetchData() async {
-    final lessons = await ScheduleService.getTodayLessons();
-    final profile = await AuthService.getProfile();
-    final unread = await NotificationService.unreadCount();
+    // Все независимые запросы — параллельно
+    final results = await Future.wait([
+      ScheduleService.getTodayLessons(), // [0]
+      AuthService.getProfile(), // [1]
+      NotificationService.unreadCount(), // [2]
+      GroupService.getMyInvitations(), // [3]
+      AnnouncementService.loadAll(), // [4]
+      GroupService.canManage(), // [5]
+    ]);
+
+    final lessons = results[0] as List<Lesson>;
+    final profile = results[1] as UserProfile?;
+    final unread = results[2] as int;
+    final invitations = results[3] as List<GroupInvitation>;
+    final announcements = results[4] as List<Announcement>;
+    final canManage = results[5] as bool;
+
+    // Проверяем отмены параллельно — после того как получили уроки
+    final cancelled = await _loadCancelledLessons(lessons);
+
     if (mounted) {
       setState(() {
         _lessons = lessons;
         _profile = profile;
         _unreadCount = unread;
-      });
-    }
-    final invitations = await GroupService.getMyInvitations();
-    final announcements = await AnnouncementService.loadAll();
-    final canManage = await GroupService.canManage();
-    final cancelled = await _loadCancelledLessons();
-    await _loadAttendanceStats();
-    if (mounted) {
-      setState(() {
         _pendingInvitations = invitations;
         _announcements = announcements;
         _canManage = canManage;
         _cancelledLessons = cancelled;
       });
     }
+
+    // Статистика посещаемости — загружаем после основных данных
+    await _loadAttendanceStats(lessons, cancelled);
   }
 
-  Future<Set<String>> _loadCancelledLessons() async {
+  Future<Set<String>> _loadCancelledLessons(List<Lesson> lessons) async {
     final date = AttendanceService.todayDate();
-    final result = <String>{};
-    // Проверяем отменён ли весь день
-    final dayOff = await AnnouncementService.isCancelled(date: date, lessonKey: 'all');
-    if (dayOff) {
-      result.add('all');
-      return result;
-    }
-    // Проверяем каждую пару
-    for (final l in _lessons) {
-      final key = AttendanceService.lessonKey(l.timeStart, l.timeEnd);
-      final off = await AnnouncementService.isCancelled(date: date, lessonKey: key);
-      if (off) result.add(key);
-    }
-    return result;
+    // Один запрос к локальной БД вместо N вызовов isCancelled
+    return AnnouncementService.getCancelledLessonKeys(date: date);
   }
 
-  Future<void> _loadAttendanceStats() async {
-    if (AttendanceService.isWeekend || _lessons.isEmpty) return;
+  Future<void> _loadAttendanceStats(List<Lesson> lessons, Set<String> cancelled) async {
+    if (AttendanceService.isWeekend || lessons.isEmpty) return;
+    if (cancelled.contains('all')) {
+      if (mounted) setState(() => _currentLessonStats = null);
+      return;
+    }
     final date = AttendanceService.todayDate();
+
+    // Проверяем все пары прошли
+    final allPast = lessons.every((l) => getLessonStatus(l.timeStart, l.timeEnd) == LessonStatus.past);
+
+    if (allPast) {
+      // Показываем суммарную посещаемость за день — берём все уроки и суммируем
+      final allLessons = await AttendanceService.loadAll();
+      final todayLessons = allLessons.where((la) => la.date == date && la.lessonKey != 'weekend').toList();
+      if (todayLessons.isEmpty || todayLessons.every((la) => la.markedCount == 0)) {
+        if (mounted) setState(() => _currentLessonStats = null);
+        return;
+      }
+      // Собираем агрегированную статистику — создаём синтетический LessonAttendance
+      final allStudents = todayLessons.expand((la) => la.students).toList();
+      // Уникальные студенты с лучшим статусом (present > late > absent)
+      final Map<String, String?> bestStatus = {};
+      for (final s in allStudents) {
+        if (s.status == null) continue;
+        final cur = bestStatus[s.studentId];
+        if (cur == null || (s.status == 'present') || (cur == 'absent' && s.status == 'late')) {
+          bestStatus[s.studentId] = s.status;
+        }
+      }
+      final summaryStudents = bestStatus.entries.map((e) {
+        final orig = allStudents.firstWhere((s) => s.studentId == e.key);
+        return StudentAttendance(studentId: e.key, lastName: orig.lastName, firstName: orig.firstName, isMale: orig.isMale, status: e.value);
+      }).toList();
+      final summary = LessonAttendance(date: date, lessonKey: 'day_summary', subject: 'Итог за день', students: summaryStudents);
+      if (mounted) setState(() => _currentLessonStats = summary);
+      return;
+    }
 
     Lesson? activeLesson;
-    for (final l in _lessons) {
+    for (final l in lessons) {
       if (getLessonStatus(l.timeStart, l.timeEnd) == LessonStatus.active) {
         activeLesson = l;
         break;
       }
     }
-    activeLesson ??= _lessons.firstWhere((l) => getLessonStatus(l.timeStart, l.timeEnd) == LessonStatus.upcoming, orElse: () => _lessons.first);
+    activeLesson ??= lessons.firstWhere((l) => getLessonStatus(l.timeStart, l.timeEnd) == LessonStatus.upcoming, orElse: () => lessons.first);
 
-    // Проверяем не отменена ли пара
     final key = AttendanceService.lessonKey(activeLesson.timeStart, activeLesson.timeEnd);
-    final isCancelled = await AnnouncementService.isCancelled(date: date, lessonKey: key);
-    final isDayCancelled = await AnnouncementService.isCancelled(date: date, lessonKey: 'all');
-
-    if (isCancelled || isDayCancelled) {
-      setState(() => _currentLessonStats = null); // скрываем карточку посещаемости
+    if (cancelled.contains(key)) {
+      if (mounted) setState(() => _currentLessonStats = null);
       return;
     }
 
     final stats = await AttendanceService.getCurrentLessonStats(date: date, lessonKey: key);
-    setState(() => _currentLessonStats = stats);
+    if (mounted) setState(() => _currentLessonStats = stats);
   }
 
   int get _remainingCount => _lessons.where((l) => getLessonStatus(l.timeStart, l.timeEnd) != LessonStatus.past).length;
 
+  /// Активная пара прямо сейчас (для счётчика и статистики)
+  Lesson? get _activeLesson {
+    for (final l in _lessons) {
+      if (getLessonStatus(l.timeStart, l.timeEnd) == LessonStatus.active) return l;
+    }
+    return null;
+  }
+
+  /// Следующая пара (только upcoming, для надписи "След.:")
   Lesson? get _nextLesson {
     for (final l in _lessons) {
-      final s = getLessonStatus(l.timeStart, l.timeEnd);
-      if (s == LessonStatus.active || s == LessonStatus.upcoming) return l;
+      if (getLessonStatus(l.timeStart, l.timeEnd) == LessonStatus.upcoming) return l;
     }
     return null;
   }
@@ -434,97 +475,102 @@ class _HomeScreenState extends State<HomeScreen> {
     final isCancel = a.isCancel;
     final color = isCancel ? const Color(0xFFF87171) : const Color(0xFF34D399);
     final icon = isCancel ? Icons.cancel_outlined : Icons.campaign_outlined;
+    final radius = fs * 0.04;
 
-    // Форматируем дату/время
-    String timeLabel = '';
-    if (a.createdAt != null) {
+    String timeLabel(DateTime? dt) {
+      if (dt == null) return '';
       final now = DateTime.now();
-      final d = a.createdAt!.toLocal();
-      final diff = now.difference(d);
-      if (diff.inMinutes < 1) {
-        timeLabel = 'только что';
-      } else if (diff.inMinutes < 60) {
-        timeLabel = '${diff.inMinutes} мин назад';
-      } else if (diff.inHours < 24 && d.day == now.day) {
-        timeLabel = 'сегодня ${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
-      } else if (diff.inHours < 48 && d.day == now.subtract(const Duration(days: 1)).day) {
-        timeLabel = 'вчера ${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
-      } else {
-        timeLabel = '${d.day.toString().padLeft(2, '0')}.${d.month.toString().padLeft(2, '0')} ${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
-      }
+      final diff = now.difference(dt);
+      if (diff.inMinutes < 1) return 'только что';
+      if (diff.inMinutes < 60) return '${diff.inMinutes} мин. назад';
+      if (diff.inHours < 24) return '${diff.inHours} ч. назад';
+      return '${dt.day.toString().padLeft(2, '0')}.${dt.month.toString().padLeft(2, '0')}';
     }
 
-    return Dismissible(
-      key: Key('ann_${a.id}'),
-      direction: _canManage ? DismissDirection.endToStart : DismissDirection.none,
-      onDismissed: (_) async {
-        await AnnouncementService.delete(a.id);
-        setState(() => _announcements.removeWhere((x) => x.id == a.id));
-      },
-      background: Container(
-        alignment: Alignment.centerRight,
-        padding: EdgeInsets.only(right: fs * 0.05),
-        decoration: BoxDecoration(color: const Color(0xFFF87171).withValues(alpha: 0.15), borderRadius: BorderRadius.circular(fs * 0.04)),
-        child: Icon(Icons.delete_outline, color: const Color(0xFFF87171), size: fs * 0.06),
-      ),
-      child: Container(
-        margin: EdgeInsets.only(bottom: h * 0.012),
-        padding: EdgeInsets.all(fs * 0.04),
-        decoration: BoxDecoration(
-          color: const Color(0xFF10232C),
-          borderRadius: BorderRadius.circular(fs * 0.04),
-          border: Border.all(color: color.withValues(alpha: 0.3), width: 1),
-        ),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
+    return Padding(
+      padding: EdgeInsets.only(bottom: h * 0.012),
+      child: ClipRect(
+        child: Stack(
           children: [
-            Container(
-              padding: EdgeInsets.all(fs * 0.02),
-              decoration: BoxDecoration(color: color.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(fs * 0.03)),
-              child: Icon(icon, color: color, size: fs * 0.048),
+            // Красный фон — заходит левее чтобы перекрыть скругления карточки
+            Positioned.fill(
+              left: radius * 0.6,
+              child: Container(
+                decoration: BoxDecoration(
+                  color: const Color(0xFFF87171).withValues(alpha: 0.18),
+                  borderRadius: BorderRadius.only(topRight: Radius.circular(radius), bottomRight: Radius.circular(radius), topLeft: Radius.circular(radius), bottomLeft: Radius.circular(radius)),
+                ),
+                alignment: Alignment.centerRight,
+                padding: EdgeInsets.only(right: fs * 0.05),
+                child: Icon(Icons.delete_outline, color: const Color(0xFFF87171), size: fs * 0.06),
+              ),
             ),
-            SizedBox(width: fs * 0.03),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  // Заголовок + время в одну строку
-                  Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Expanded(
-                        child: Text(
-                          a.title,
-                          style: TextStyle(color: Colors.white, fontSize: fs * 0.037, fontWeight: FontWeight.w600),
-                        ),
-                      ),
-                      if (timeLabel.isNotEmpty)
-                        Padding(
-                          padding: EdgeInsets.only(left: fs * 0.02),
-                          child: Text(
-                            timeLabel,
-                            style: TextStyle(color: const Color(0xFF455664), fontSize: fs * 0.025),
+            // Карточка поверх
+            Dismissible(
+              key: Key('ann_${a.id}'),
+              direction: _canManage ? DismissDirection.endToStart : DismissDirection.none,
+              onDismissed: (_) async {
+                await AnnouncementService.delete(a.id);
+                setState(() => _announcements.removeWhere((x) => x.id == a.id));
+              },
+              background: const SizedBox.shrink(),
+              secondaryBackground: const SizedBox.shrink(),
+              child: Container(
+                padding: EdgeInsets.all(fs * 0.04),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF10232C),
+                  borderRadius: BorderRadius.circular(radius),
+                  border: Border.all(color: color.withValues(alpha: 0.3), width: 1),
+                ),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Container(
+                      padding: EdgeInsets.all(fs * 0.02),
+                      decoration: BoxDecoration(color: color.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(fs * 0.03)),
+                      child: Icon(icon, color: color, size: fs * 0.048),
+                    ),
+                    SizedBox(width: fs * 0.03),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  a.title,
+                                  style: TextStyle(color: Colors.white, fontSize: fs * 0.037, fontWeight: FontWeight.w600),
+                                ),
+                              ),
+                              if (a.createdAt != null)
+                                Text(
+                                  timeLabel(a.createdAt),
+                                  style: TextStyle(color: const Color(0xFF455664), fontSize: fs * 0.027),
+                                ),
+                            ],
                           ),
-                        ),
-                    ],
-                  ),
-                  if (a.body.isNotEmpty) ...[
-                    const SizedBox(height: 3),
-                    Text(
-                      a.body,
-                      style: TextStyle(color: const Color(0xFF7D92B1), fontSize: fs * 0.031),
-                      maxLines: 3,
-                      overflow: TextOverflow.ellipsis,
+                          if (a.body.isNotEmpty) ...[
+                            const SizedBox(height: 3),
+                            Text(
+                              a.body,
+                              style: TextStyle(color: const Color(0xFF7D92B1), fontSize: fs * 0.031),
+                              maxLines: 3,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ],
+                          if (a.authorName != null) ...[
+                            const SizedBox(height: 4),
+                            Text(
+                              a.authorName!,
+                              style: TextStyle(color: color.withValues(alpha: 0.7), fontSize: fs * 0.027),
+                            ),
+                          ],
+                        ],
+                      ),
                     ),
                   ],
-                  if (a.authorName != null) ...[
-                    const SizedBox(height: 4),
-                    Text(
-                      a.authorName!,
-                      style: TextStyle(color: color.withValues(alpha: 0.7), fontSize: fs * 0.027),
-                    ),
-                  ],
-                ],
+                ),
               ),
             ),
           ],
@@ -549,8 +595,13 @@ class _HomeScreenState extends State<HomeScreen> {
 
   // ── Карточка «Оставшиеся занятия» ──
   Widget _buildLessonsCard(double fs, double h, double w) {
+    final active = _activeLesson;
     final next = _nextLesson;
-    final nextLabel = next != null ? 'След.: ${next.subject.split(' ').first} | ${next.timeStart}' : 'Занятий больше нет';
+    final nextLabel = active != null
+        ? 'Сейчас: ${active.subject.split(' ').first} | ${active.timeStart}'
+        : next != null
+        ? 'След.: ${next.subject.split(' ').first} | ${next.timeStart}'
+        : 'Занятий больше нет';
 
     return Container(
       width: double.infinity,
@@ -902,10 +953,9 @@ class _AnnouncementSheetState extends State<_AnnouncementSheet> {
   late final TextEditingController _bodyCtrl;
   bool _isSaving = false;
   String? _error;
-  // Срок действия: null = бессрочно, иначе кол-во дней
-  int? _durationDays = 3;
-
-  static const _durations = [(label: '1 день', days: 1), (label: '3 дня', days: 3), (label: '7 дней', days: 7), (label: 'Бессрочно', days: 0)];
+  String _durationType = 'days'; // 'hours', 'days', 'forever'
+  int _durationHours = 6;
+  int _durationDays = 3;
 
   @override
   void initState() {
@@ -933,8 +983,10 @@ class _AnnouncementSheetState extends State<_AnnouncementSheet> {
     });
 
     DateTime? expiresAt;
-    if (_durationDays != null && _durationDays! > 0) {
-      expiresAt = DateTime.now().add(Duration(days: _durationDays!));
+    if (_durationType == 'hours') {
+      expiresAt = DateTime.now().add(Duration(hours: _durationHours));
+    } else if (_durationType == 'days') {
+      expiresAt = DateTime.now().add(Duration(days: _durationDays));
     }
 
     final res = await AnnouncementService.create(title: title, body: _bodyCtrl.text.trim(), expiresAt: expiresAt);
@@ -950,10 +1002,66 @@ class _AnnouncementSheetState extends State<_AnnouncementSheet> {
     }
   }
 
+  Widget _typeBtn(double fs, String type, String label) {
+    final selected = _durationType == type;
+    return Expanded(
+      child: GestureDetector(
+        onTap: () => setState(() => _durationType = type),
+        child: Container(
+          padding: EdgeInsets.symmetric(vertical: fs * 0.022),
+          decoration: BoxDecoration(
+            color: selected ? const Color(0xFF0D59F2).withValues(alpha: 0.15) : const Color(0xFF10232C),
+            borderRadius: BorderRadius.circular(fs * 0.03),
+            border: Border.all(color: selected ? const Color(0xFF0D59F2) : const Color(0xFF455664)),
+          ),
+          child: Center(
+            child: Text(
+              label,
+              style: TextStyle(color: selected ? const Color(0xFF0D59F2) : const Color(0xFF7D92B1), fontSize: fs * 0.03, fontWeight: selected ? FontWeight.w700 : FontWeight.normal),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _valueBtn(double fs, int val, List<int> allVals) {
+    final selected = _durationType == 'hours' ? _durationHours == val : _durationDays == val;
+    final isLast = allVals.last == val;
+    return Expanded(
+      child: GestureDetector(
+        onTap: () => setState(() {
+          if (_durationType == 'hours') {
+            _durationHours = val;
+          } else {
+            _durationDays = val;
+          }
+        }),
+        child: Container(
+          margin: EdgeInsets.only(right: isLast ? 0 : fs * 0.02),
+          padding: EdgeInsets.symmetric(vertical: fs * 0.022),
+          decoration: BoxDecoration(
+            color: selected ? const Color(0xFF0D59F2).withValues(alpha: 0.15) : const Color(0xFF10232C),
+            borderRadius: BorderRadius.circular(fs * 0.03),
+            border: Border.all(color: selected ? const Color(0xFF0D59F2) : const Color(0xFF455664)),
+          ),
+          child: Center(
+            child: Text(
+              '$val',
+              style: TextStyle(color: selected ? const Color(0xFF0D59F2) : const Color(0xFF7D92B1), fontSize: fs * 0.032, fontWeight: selected ? FontWeight.w700 : FontWeight.normal),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final w = MediaQuery.of(context).size.width;
     final fs = w.clamp(320.0, 430.0);
+    final hourVals = [1, 2, 3, 6, 12];
+    final dayVals = [1, 3, 7, 14];
 
     return Padding(
       padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
@@ -1023,39 +1131,36 @@ class _AnnouncementSheetState extends State<_AnnouncementSheet> {
                 ),
               ),
             ),
-
             SizedBox(height: fs * 0.03),
 
-            // Срок действия
+            // Срок действия — заголовок
             Text(
               'Срок действия',
               style: TextStyle(color: const Color(0xFF7D92B1), fontSize: fs * 0.032, fontWeight: FontWeight.w500),
             ),
             SizedBox(height: fs * 0.015),
+
+            // Ряд 1 — тип
             Row(
-              children: _durations.map((d) {
-                final selected = (_durationDays ?? 0) == d.days;
-                return Expanded(
-                  child: GestureDetector(
-                    onTap: () => setState(() => _durationDays = d.days == 0 ? null : d.days),
-                    child: Container(
-                      margin: EdgeInsets.only(right: _durations.last == d ? 0 : fs * 0.02),
-                      padding: EdgeInsets.symmetric(vertical: fs * 0.022),
-                      decoration: BoxDecoration(
-                        color: selected ? const Color(0xFF0D59F2).withValues(alpha: 0.15) : const Color(0xFF10232C),
-                        borderRadius: BorderRadius.circular(fs * 0.03),
-                        border: Border.all(color: selected ? const Color(0xFF0D59F2) : const Color(0xFF455664)),
-                      ),
-                      child: Center(
-                        child: Text(
-                          d.label,
-                          style: TextStyle(color: selected ? const Color(0xFF0D59F2) : const Color(0xFF7D92B1), fontSize: fs * 0.028, fontWeight: selected ? FontWeight.w700 : FontWeight.normal),
-                        ),
-                      ),
+              children: [
+                _typeBtn(fs, 'hours', 'Часы'),
+                SizedBox(width: fs * 0.02),
+                _typeBtn(fs, 'days', 'Дни'),
+                SizedBox(width: fs * 0.02),
+                _typeBtn(fs, 'forever', 'Бессрочно'),
+              ],
+            ),
+
+            // Ряд 2 — значения (анимированно появляются)
+            AnimatedSize(
+              duration: const Duration(milliseconds: 200),
+              curve: Curves.easeInOut,
+              child: _durationType == 'forever'
+                  ? const SizedBox.shrink()
+                  : Padding(
+                      padding: EdgeInsets.only(top: fs * 0.015),
+                      child: Row(children: (_durationType == 'hours' ? hourVals : dayVals).map((val) => _valueBtn(fs, val, _durationType == 'hours' ? hourVals : dayVals)).toList()),
                     ),
-                  ),
-                );
-              }).toList(),
             ),
 
             // Ошибка

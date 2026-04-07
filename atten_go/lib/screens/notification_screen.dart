@@ -1,9 +1,8 @@
-import 'dart:async';
 import 'package:flutter/material.dart';
 import '../services/notification_service.dart';
 import '../services/group_service.dart';
 import '../services/attendance_service.dart';
-import '../services/realtime_service.dart';
+import '../utils/app_snackbar.dart';
 
 class NotificationScreen extends StatefulWidget {
   const NotificationScreen({super.key});
@@ -16,32 +15,10 @@ class _NotificationScreenState extends State<NotificationScreen> {
   List<GroupInvitation> _invitations = [];
   bool _isLoading = true;
 
-  final List<StreamSubscription> _subs = [];
-
   @override
   void initState() {
     super.initState();
     _load();
-
-    // Авто-обновление при новых уведомлениях/приглашениях
-    _subs.add(
-      RealtimeService.onNotificationsChanged.listen((_) {
-        if (mounted) _load();
-      }),
-    );
-    _subs.add(
-      RealtimeService.onInvitationsChanged.listen((_) {
-        if (mounted) _load();
-      }),
-    );
-  }
-
-  @override
-  void dispose() {
-    for (final sub in _subs) {
-      sub.cancel();
-    }
-    super.dispose();
   }
 
   Future<void> _load() async {
@@ -57,24 +34,30 @@ class _NotificationScreenState extends State<NotificationScreen> {
   }
 
   Future<void> _accept(GroupInvitation inv) async {
-    final res = await GroupService.acceptInvitation(inv.id);
-    if (res.success) {
+    try {
+      await GroupService.acceptInvitation(inv.id);
+      if (!mounted) return;
+
       AttendanceService.invalidateCache();
       GroupService.invalidateCache();
       _load();
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Вы вступили в группу')));
-        // Передаём true — роль изменилась, MainScreen должен перезагрузить вкладки
-        Navigator.pop(context, true);
-      }
-    } else if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(res.error ?? 'Ошибка')));
+      AppSnackBar.success(context, 'Вы вступили в группу');
+      Navigator.pop(context, true);
+    } catch (e) {
+      if (mounted) AppSnackBar.error(context, 'Ошибка: $e');
     }
   }
 
   Future<void> _decline(GroupInvitation inv) async {
-    await GroupService.declineInvitation(inv.id);
-    _load();
+    try {
+      await GroupService.declineInvitation(inv.id);
+      if (!mounted) return;
+
+      _load();
+      AppSnackBar.success(context, 'Приглашение отклонено');
+    } catch (e) {
+      if (mounted) AppSnackBar.error(context, 'Ошибка: $e');
+    }
   }
 
   @override
@@ -274,59 +257,86 @@ class _NotificationScreenState extends State<NotificationScreen> {
   }
 
   Widget _notifCard(double fs, double h, AppNotification n) {
-    return Dismissible(
-      key: Key('n_${n.id}'),
-      direction: DismissDirection.endToStart,
-      onDismissed: (_) => NotificationService.delete(n.id),
-      background: Container(
-        alignment: Alignment.centerRight,
-        padding: EdgeInsets.only(right: fs * 0.05),
-        decoration: BoxDecoration(color: const Color(0xFFF87171).withValues(alpha: 0.2), borderRadius: BorderRadius.circular(fs * 0.04)),
-        child: Icon(Icons.delete_outline, color: const Color(0xFFF87171), size: fs * 0.06),
-      ),
-      child: Container(
-        margin: EdgeInsets.only(bottom: h * 0.01),
-        padding: EdgeInsets.all(fs * 0.035),
-        decoration: BoxDecoration(
-          color: const Color(0xFF10232C),
-          borderRadius: BorderRadius.circular(fs * 0.04),
-          border: Border.all(color: n.isRead ? const Color(0xFF455664).withValues(alpha: 0.5) : const Color(0xFF455664)),
-        ),
-        child: Row(
+    // Определяем цвет и иконку по типу уведомления
+    final isDeclined = n.type == 'invite_declined';
+    final isAccepted = n.type == 'invite_accepted';
+    final iconColor = isDeclined ? const Color(0xFFF87171) : const Color(0xFF0D59F2);
+    final iconData = isAccepted
+        ? Icons.check_circle_outline
+        : isDeclined
+        ? Icons.cancel_outlined
+        : Icons.notifications_rounded;
+
+    final radius = fs * 0.04;
+    return Padding(
+      padding: EdgeInsets.only(bottom: h * 0.01),
+      child: ClipRect(
+        child: Stack(
           children: [
-            Container(
-              width: fs * 0.1,
-              height: fs * 0.1,
-              decoration: BoxDecoration(color: const Color(0xFF0D59F2).withValues(alpha: 0.15), borderRadius: BorderRadius.circular(fs * 0.03)),
-              child: Icon(n.type == 'invite_accepted' ? Icons.check_circle_outline : Icons.notifications_rounded, color: const Color(0xFF0D59F2), size: fs * 0.05),
+            Positioned.fill(
+              left: radius * 0.6,
+              child: Container(
+                decoration: BoxDecoration(
+                  color: const Color(0xFFF87171).withValues(alpha: 0.18),
+                  borderRadius: BorderRadius.only(topRight: Radius.circular(radius), bottomRight: Radius.circular(radius)),
+                ),
+                alignment: Alignment.centerRight,
+                padding: EdgeInsets.only(right: fs * 0.05),
+                child: Icon(Icons.delete_outline, color: const Color(0xFFF87171), size: fs * 0.06),
+              ),
             ),
-            SizedBox(width: fs * 0.03),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    n.title,
-                    style: TextStyle(color: Colors.white, fontSize: fs * 0.035, fontWeight: n.isRead ? FontWeight.normal : FontWeight.w600),
-                  ),
-                  if (n.body.isNotEmpty) ...[
-                    const SizedBox(height: 2),
-                    Text(
-                      n.body,
-                      style: TextStyle(color: const Color(0xFF7D92B1), fontSize: fs * 0.03),
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
+            Dismissible(
+              key: Key('n_${n.id}'),
+              direction: DismissDirection.endToStart,
+              onDismissed: (_) => NotificationService.delete(n.id),
+              background: const SizedBox.shrink(),
+              secondaryBackground: const SizedBox.shrink(),
+              child: Container(
+                padding: EdgeInsets.all(fs * 0.035),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF10232C),
+                  borderRadius: BorderRadius.circular(radius),
+                  border: Border.all(color: n.isRead ? const Color(0xFF455664).withValues(alpha: 0.5) : const Color(0xFF455664)),
+                ),
+                child: Row(
+                  children: [
+                    Container(
+                      width: fs * 0.1,
+                      height: fs * 0.1,
+                      decoration: BoxDecoration(color: iconColor.withValues(alpha: 0.15), borderRadius: BorderRadius.circular(fs * 0.03)),
+                      child: Icon(iconData, color: iconColor, size: fs * 0.05),
                     ),
+                    SizedBox(width: fs * 0.03),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            n.title,
+                            style: TextStyle(color: Colors.white, fontSize: fs * 0.035, fontWeight: n.isRead ? FontWeight.normal : FontWeight.w600),
+                          ),
+                          if (n.body.isNotEmpty) ...[
+                            const SizedBox(height: 2),
+                            Text(
+                              n.body,
+                              style: TextStyle(color: const Color(0xFF7D92B1), fontSize: fs * 0.03),
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                    if (!n.isRead)
+                      Container(
+                        width: 8,
+                        height: 8,
+                        decoration: const BoxDecoration(color: Color(0xFF0D59F2), shape: BoxShape.circle),
+                      ),
                   ],
-                ],
+                ),
               ),
             ),
-            if (!n.isRead)
-              Container(
-                width: 8,
-                height: 8,
-                decoration: const BoxDecoration(color: Color(0xFF0D59F2), shape: BoxShape.circle),
-              ),
           ],
         ),
       ),

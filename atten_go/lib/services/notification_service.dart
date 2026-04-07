@@ -1,6 +1,12 @@
+// lib/services/notification_service.dart
+//
+// Читает из LocalDatabase, пишет в Supabase → триггерит синхронизацию.
+
+import 'dart:convert';
 import 'dart:developer' as developer;
 import 'db_service.dart';
 import 'auth_service.dart';
+import '../local/sync_service.dart';
 
 class AppNotification {
   final int id;
@@ -28,47 +34,51 @@ class AppNotification {
         body: row['body'] as String? ?? '',
         data: row['data'] as Map<String, dynamic>? ?? {},
         isRead: row['is_read'] as bool? ?? false,
-        createdAt: row['created_at'] != null ? DateTime.tryParse(row['created_at'] as String) : null,
+        createdAt: row['created_at'] != null
+            ? DateTime.tryParse(row['created_at'] as String)
+            : null,
       );
 }
 
 class NotificationService {
-  static final _db = DatabaseService.client;
+  static final _supa = DatabaseService.client;
+  static final _local = SyncService.db;
   static String? get _uid => AuthService.currentUserId;
+
+  // ── ЧТЕНИЕ ИЗ ЛОКАЛЬНОЙ БД ────────────────────────────────────────────────
 
   static Future<List<AppNotification>> loadAll() async {
     if (_uid == null) return [];
-    try {
-      final rows = await _db
-          .from('notifications')
-          .select()
-          .eq('user_id', _uid!)
-          .order('created_at', ascending: false)
-          .limit(50);
-      return (rows as List).map((r) => AppNotification.fromRow(r)).toList();
-    } catch (e) {
-      developer.log('[NotificationService] loadAll error: $e');
-      return [];
-    }
+    final rows = await _local.getNotifications(_uid!);
+    return rows
+        .map((r) => AppNotification(
+              id: r.id,
+              type: r.type,
+              title: r.title,
+              body: r.body,
+              data: _parseJson(r.data),
+              isRead: r.isRead,
+              createdAt: r.createdAt != null
+                  ? DateTime.tryParse(r.createdAt!)
+                  : null,
+            ))
+        .toList();
   }
 
   static Future<int> unreadCount() async {
     if (_uid == null) return 0;
-    try {
-      final rows = await _db
-          .from('notifications')
-          .select('id')
-          .eq('user_id', _uid!)
-          .eq('is_read', false);
-      return (rows as List).length;
-    } catch (e) {
-      return 0;
-    }
+    return _local.getUnreadCount(_uid!);
   }
+
+  // ── ЗАПИСЬ В SUPABASE + СИНХРОНИЗАЦИЯ ─────────────────────────────────────
 
   static Future<void> markAsRead(int notificationId) async {
     try {
-      await _db.from('notifications').update({'is_read': true}).eq('id', notificationId);
+      await _supa
+          .from('notifications')
+          .update({'is_read': true}).eq('id', notificationId);
+      // Оптимистично обновляем локальную БД
+      await _local.markNotificationRead(notificationId);
     } catch (e) {
       developer.log('[NotificationService] markAsRead error: $e');
     }
@@ -77,7 +87,12 @@ class NotificationService {
   static Future<void> markAllAsRead() async {
     if (_uid == null) return;
     try {
-      await _db.from('notifications').update({'is_read': true}).eq('user_id', _uid!).eq('is_read', false);
+      await _supa
+          .from('notifications')
+          .update({'is_read': true})
+          .eq('user_id', _uid!)
+          .eq('is_read', false);
+      await _local.markAllNotificationsRead(_uid!);
     } catch (e) {
       developer.log('[NotificationService] markAllAsRead error: $e');
     }
@@ -85,9 +100,20 @@ class NotificationService {
 
   static Future<void> delete(int notificationId) async {
     try {
-      await _db.from('notifications').delete().eq('id', notificationId);
+      await _supa.from('notifications').delete().eq('id', notificationId);
+      await _local.deleteNotification(notificationId);
     } catch (e) {
       developer.log('[NotificationService] delete error: $e');
+    }
+  }
+
+  // ── УТИЛИТЫ ───────────────────────────────────────────────────────────────
+
+  static Map<String, dynamic> _parseJson(String raw) {
+    try {
+      return jsonDecode(raw) as Map<String, dynamic>;
+    } catch (_) {
+      return {};
     }
   }
 }

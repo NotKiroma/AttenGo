@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:flutter/services.dart';
 import 'package:flutter/material.dart';
 import '../services/attendance_service.dart';
 import '../services/student_service.dart';
@@ -8,6 +9,7 @@ import '../services/schedule_service.dart';
 import '../services/realtime_service.dart';
 import 'student_profile_screen.dart';
 import '../utils/dark_page_route.dart';
+import '../utils/app_snackbar.dart';
 
 class AttendanceScreen extends StatefulWidget {
   const AttendanceScreen({super.key});
@@ -26,6 +28,8 @@ class _AttendanceScreenState extends State<AttendanceScreen> with WidgetsBinding
   bool _isWeekend = false;
   bool _hasGroup = false;
   bool _isCancelledLesson = false;
+  bool _isSaving = false; // Блокирует realtime-обновления во время сохранения
+  bool _isCopying = false; // Показывает лоадер для «Как на прошлой паре»
 
   List<Student> _fullStudents = [];
   List<Lesson> _todaySchedule = [];
@@ -41,31 +45,31 @@ class _AttendanceScreenState extends State<AttendanceScreen> with WidgetsBinding
     WidgetsBinding.instance.addObserver(this);
     _init();
 
-    // Авто-обновление при изменениях в БД
+    // Авто-обновление при изменениях в БД (игнорируем во время сохранения)
     _subs.add(
       RealtimeService.onAttendanceRecordsChanged.listen((_) {
-        if (mounted) _refresh();
+        if (mounted && !_isSaving) _refresh();
       }),
     );
     _subs.add(
       RealtimeService.onStudentsChanged.listen((_) {
-        if (mounted) _refresh();
+        if (mounted && !_isSaving) _refresh();
       }),
     );
     _subs.add(
       RealtimeService.onAttendanceLessonsChanged.listen((_) {
-        if (mounted) _refresh();
+        if (mounted && !_isSaving) _refresh();
       }),
     );
   }
 
   @override
   void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
-    _searchController.dispose();
     for (final sub in _subs) {
       sub.cancel();
     }
+    _subs.clear();
+    _searchController.dispose(); // Не забываем контроллер текстового поля
     super.dispose();
   }
 
@@ -179,11 +183,11 @@ class _AttendanceScreenState extends State<AttendanceScreen> with WidgetsBinding
 
     final key = AttendanceService.lessonKey(lesson.timeStart, lesson.timeEnd);
 
-    // Проверяем отменена ли пара или весь день
-    final isCancelled = await AnnouncementService.isCancelled(date: date, lessonKey: key);
-    final isDayCancelled = await AnnouncementService.isCancelled(date: date, lessonKey: 'all');
+    // Проверяем отменена ли пара или весь день — один запрос к локальной БД
+    final cancelledKeys = await AnnouncementService.getCancelledLessonKeys(date: date);
+    final isCancelled = cancelledKeys.contains(key) || cancelledKeys.contains('all');
 
-    if (isCancelled || isDayCancelled) {
+    if (isCancelled) {
       // Пара отменена — показываем студентов без возможности отмечать
       final students = await StudentService.loadAll();
       _currentLesson = LessonAttendance(date: date, lessonKey: 'cancelled', subject: lesson.subject, students: students.map((s) => StudentAttendance.fromStudent(s)).toList());
@@ -228,7 +232,9 @@ class _AttendanceScreenState extends State<AttendanceScreen> with WidgetsBinding
 
   /// Найти предыдущую НЕотменённую пару и скопировать статусы
   Future<void> _copyFromPrevious() async {
-    if (_currentLesson == null || _todaySchedule.isEmpty) return;
+    if (_currentLesson == null || _todaySchedule.isEmpty || _isCopying) return;
+
+    setState(() => _isCopying = true);
 
     final date = AttendanceService.todayDate();
 
@@ -246,33 +252,36 @@ class _AttendanceScreenState extends State<AttendanceScreen> with WidgetsBinding
     }
 
     if (currentIdx <= 0) {
+      setState(() => _isCopying = false);
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Нет предыдущей пары')));
+        AppSnackBar.error(context, 'Нет предыдущей пары');
       }
       return;
     }
 
     // Ищем предыдущую НЕотменённую пару (идём назад от currentIdx - 1)
+    // Загружаем отменённые пары один раз до цикла
+    final cancelledKeys = await AnnouncementService.getCancelledLessonKeys(date: date);
     LessonAttendance? prevLesson;
     for (int i = currentIdx - 1; i >= 0; i--) {
       final l = _todaySchedule[i];
       final key = AttendanceService.lessonKey(l.timeStart, l.timeEnd);
-      final cancelled = await AnnouncementService.isCancelled(date: date, lessonKey: key);
-      final dayOff = await AnnouncementService.isCancelled(date: date, lessonKey: 'all');
-      if (!cancelled && !dayOff) {
+      if (!cancelledKeys.contains(key) && !cancelledKeys.contains('all')) {
         prevLesson = await AttendanceService.getCurrentLessonStats(date: date, lessonKey: key);
         break;
       }
     }
 
     if (prevLesson == null || prevLesson.markedCount == 0) {
+      setState(() => _isCopying = false);
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Предыдущая пара не отмечена')));
+        AppSnackBar.error(context, 'Предыдущая пара не отмечена');
       }
       return;
     }
 
     // Копируем статусы
+    _isSaving = true;
     final current = _currentLesson!;
     for (final student in current.students) {
       try {
@@ -286,10 +295,13 @@ class _AttendanceScreenState extends State<AttendanceScreen> with WidgetsBinding
     }
 
     await AttendanceService.saveLesson(current);
-    setState(() {});
+    await Future.delayed(const Duration(milliseconds: 500));
+    _isSaving = false;
+
+    setState(() => _isCopying = false);
 
     if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Скопировано с пары «${prevLesson.subject}»'), backgroundColor: const Color(0xFF10232C)));
+      AppSnackBar.success(context, 'Скопировано с пары «${prevLesson.subject}»');
     }
   }
 
@@ -453,7 +465,11 @@ class _AttendanceScreenState extends State<AttendanceScreen> with WidgetsBinding
 
   Future<void> _save() async {
     if (_currentLesson != null) {
+      _isSaving = true;
       await AttendanceService.saveLesson(_currentLesson!);
+      // Задержка чтобы Realtime-события от нашего сохранения прошли
+      await Future.delayed(const Duration(milliseconds: 500));
+      _isSaving = false;
     }
   }
 
@@ -472,13 +488,15 @@ class _AttendanceScreenState extends State<AttendanceScreen> with WidgetsBinding
     final students = _currentLesson!.students;
     final indexes = List<int>.generate(students.length, (i) => i);
 
-    final filtered = _searchQuery.isEmpty
-        ? indexes
-        : indexes.where((i) {
-            final last = students[i].lastName.toLowerCase();
-            final first = students[i].firstName.toLowerCase();
-            return last.contains(_searchQuery) || first.contains(_searchQuery);
-          }).toList();
+    final filtered = indexes.where((i) {
+      final s = students[i];
+      // Фильтруем студентов без имени (inactive / удалённые)
+      if (s.lastName.isEmpty && s.firstName.isEmpty) return false;
+      if (_searchQuery.isEmpty) return true;
+      final last = s.lastName.toLowerCase();
+      final first = s.firstName.toLowerCase();
+      return last.contains(_searchQuery) || first.contains(_searchQuery);
+    }).toList();
 
     filtered.sort((a, b) {
       final cmp = students[a].lastName.compareTo(students[b].lastName);
@@ -491,11 +509,11 @@ class _AttendanceScreenState extends State<AttendanceScreen> with WidgetsBinding
   Color _statusColor(String? status) {
     switch (status) {
       case 'present':
-        return Colors.green;
+        return const Color(0xFF34D399);
       case 'absent':
-        return Colors.red;
+        return const Color(0xFFF87171);
       case 'late':
-        return Colors.orange;
+        return const Color(0xFFFACC15);
       default:
         return Colors.transparent;
     }
@@ -521,6 +539,8 @@ class _AttendanceScreenState extends State<AttendanceScreen> with WidgetsBinding
   void _showStatusSheet(BuildContext context, int originalIndex) {
     if (_currentLesson == null) return;
     final student = _currentLesson!.students[originalIndex];
+    final w = MediaQuery.of(context).size.width;
+    final fs = w.clamp(320.0, 430.0);
 
     showModalBottomSheet(
       context: context,
@@ -531,41 +551,50 @@ class _AttendanceScreenState extends State<AttendanceScreen> with WidgetsBinding
           color: Color(0xFF152028),
           borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
         ),
-        padding: const EdgeInsets.fromLTRB(16, 24, 16, 40),
+        padding: EdgeInsets.fromLTRB(fs * 0.05, fs * 0.06, fs * 0.05, fs * 0.1),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            // Handle
+            Center(
+              child: Container(
+                width: fs * 0.1,
+                height: 4,
+                margin: EdgeInsets.only(bottom: fs * 0.04),
+                decoration: BoxDecoration(color: const Color(0xFF455664), borderRadius: BorderRadius.circular(2)),
+              ),
+            ),
             Padding(
-              padding: const EdgeInsets.only(bottom: 20),
+              padding: EdgeInsets.only(bottom: fs * 0.04),
               child: Text(
                 '${student.lastName} ${student.firstName}',
-                style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold),
+                style: TextStyle(color: Colors.white, fontSize: fs * 0.045, fontWeight: FontWeight.bold),
               ),
             ),
             _buildStatusOption(
               label: 'ПРИСУТСТВУЕТ',
-              color: Colors.green,
+              color: const Color(0xFF34D399),
               onTap: () {
                 setState(() => _currentLesson!.students[originalIndex].status = 'present');
                 _save();
                 Navigator.pop(context);
               },
             ),
-            const SizedBox(height: 12),
+            SizedBox(height: fs * 0.025),
             _buildStatusOption(
               label: 'ОТСУТСТВУЕТ',
-              color: Colors.red,
+              color: const Color(0xFFF87171),
               onTap: () {
                 setState(() => _currentLesson!.students[originalIndex].status = 'absent');
                 _save();
                 Navigator.pop(context);
               },
             ),
-            const SizedBox(height: 12),
+            SizedBox(height: fs * 0.025),
             _buildStatusOption(
               label: 'УВАЖ. ПРИЧИНА',
-              color: Colors.orange,
+              color: const Color(0xFFFACC15),
               onTap: () {
                 setState(() => _currentLesson!.students[originalIndex].status = 'late');
                 _save();
@@ -573,7 +602,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> with WidgetsBinding
               },
             ),
             if (student.status != null) ...[
-              const SizedBox(height: 12),
+              SizedBox(height: fs * 0.025),
               _buildStatusOption(
                 label: 'СБРОСИТЬ',
                 color: const Color(0xFF7D92B1),
@@ -599,78 +628,126 @@ class _AttendanceScreenState extends State<AttendanceScreen> with WidgetsBinding
         return c != 0 ? c : a.firstName.compareTo(b.firstName);
       });
 
+    // Формируем текст для копирования
+    String buildCopyText() {
+      final emoji = status == 'present'
+          ? '✅'
+          : status == 'absent'
+          ? '❌'
+          : '🟡';
+      final header = '$emoji $title (${filtered.length} чел.) — ${_currentLesson!.subject}';
+      final lines = filtered.asMap().entries.map((e) => '${e.key + 1}. ${e.value.lastName} ${e.value.firstName}').join('\n');
+      return '$header\n$lines';
+    }
+
     showModalBottomSheet(
       context: context,
       backgroundColor: Colors.transparent,
       isScrollControlled: true,
       builder: (_) {
         final double mh = MediaQuery.of(context).size.height * 0.65;
-        return Container(
-          constraints: BoxConstraints(maxHeight: mh),
-          decoration: const BoxDecoration(
-            color: Color(0xFF152028),
-            borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(20, 20, 20, 12),
-                child: Row(
-                  children: [
-                    Container(
-                      width: 10,
-                      height: 10,
-                      decoration: BoxDecoration(color: color, shape: BoxShape.circle),
-                    ),
-                    const SizedBox(width: 10),
-                    Text(
-                      title,
-                      style: TextStyle(color: color, fontSize: 16, fontWeight: FontWeight.bold),
-                    ),
-                    const Spacer(),
-                    Text('${filtered.length} чел.', style: const TextStyle(color: Color(0xFF7D92B1), fontSize: 14)),
-                  ],
-                ),
+        bool copied = false;
+        return StatefulBuilder(
+          builder: (ctx, setSheetState) {
+            return Container(
+              constraints: BoxConstraints(maxHeight: mh),
+              decoration: const BoxDecoration(
+                color: Color(0xFF152028),
+                borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
               ),
-              Container(height: 1, color: const Color(0xFF455664)),
-              if (filtered.isEmpty)
-                const Padding(
-                  padding: EdgeInsets.all(32),
-                  child: Text('Никого нет', style: TextStyle(color: Color(0xFF7D92B1), fontSize: 15)),
-                )
-              else
-                Flexible(
-                  child: ListView.separated(
-                    padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
-                    shrinkWrap: true,
-                    itemCount: filtered.length,
-                    separatorBuilder: (_, _) => const SizedBox(height: 8),
-                    itemBuilder: (ctx, i) {
-                      final s = filtered[i];
-                      return Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                        decoration: BoxDecoration(
-                          color: const Color(0xFF10232C),
-                          borderRadius: BorderRadius.circular(16),
-                          border: Border.all(color: const Color(0xFF455664), width: 1),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(20, 20, 20, 12),
+                    child: Row(
+                      children: [
+                        Container(
+                          width: 10,
+                          height: 10,
+                          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
                         ),
-                        child: Row(
-                          children: [
-                            _studentAvatar(s, 18),
-                            const SizedBox(width: 12),
-                            Text(
-                              '${s.lastName} ${s.firstName}',
-                              style: const TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.w500),
+                        const SizedBox(width: 10),
+                        Text(
+                          title,
+                          style: TextStyle(color: color, fontSize: 16, fontWeight: FontWeight.bold),
+                        ),
+                        const Spacer(),
+                        Text('${filtered.length} чел.', style: const TextStyle(color: Color(0xFF7D92B1), fontSize: 14)),
+                        const SizedBox(width: 12),
+                        // Кнопка копирования
+                        if (filtered.isNotEmpty)
+                          GestureDetector(
+                            onTap: () async {
+                              await Clipboard.setData(ClipboardData(text: buildCopyText()));
+                              setSheetState(() => copied = true);
+                              await Future.delayed(const Duration(seconds: 2));
+                              setSheetState(() => copied = false);
+                            },
+                            child: AnimatedContainer(
+                              duration: const Duration(milliseconds: 200),
+                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                              decoration: BoxDecoration(
+                                color: copied ? const Color(0xFF34D399).withValues(alpha: 0.15) : const Color(0xFF0D59F2).withValues(alpha: 0.12),
+                                borderRadius: BorderRadius.circular(10),
+                                border: Border.all(color: copied ? const Color(0xFF34D399) : const Color(0xFF0D59F2), width: 1),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(copied ? Icons.check_rounded : Icons.copy_rounded, size: 14, color: copied ? const Color(0xFF34D399) : const Color(0xFF0D59F2)),
+                                  const SizedBox(width: 4),
+                                  Text(
+                                    copied ? 'Скопировано' : 'Копировать',
+                                    style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: copied ? const Color(0xFF34D399) : const Color(0xFF0D59F2)),
+                                  ),
+                                ],
+                              ),
                             ),
-                          ],
-                        ),
-                      );
-                    },
+                          ),
+                      ],
+                    ),
                   ),
-                ),
-            ],
-          ),
+                  Container(height: 1, color: const Color(0xFF455664)),
+                  if (filtered.isEmpty)
+                    const Padding(
+                      padding: EdgeInsets.all(32),
+                      child: Text('Никого нет', style: TextStyle(color: Color(0xFF7D92B1), fontSize: 15)),
+                    )
+                  else
+                    Flexible(
+                      child: ListView.separated(
+                        padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
+                        shrinkWrap: true,
+                        itemCount: filtered.length,
+                        separatorBuilder: (_, _) => const SizedBox(height: 8),
+                        itemBuilder: (ctx, i) {
+                          final s = filtered[i];
+                          return Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF10232C),
+                              borderRadius: BorderRadius.circular(16),
+                              border: Border.all(color: const Color(0xFF455664), width: 1),
+                            ),
+                            child: Row(
+                              children: [
+                                _studentAvatar(s, 18),
+                                const SizedBox(width: 12),
+                                Text(
+                                  '${s.lastName} ${s.firstName}',
+                                  style: const TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.w500),
+                                ),
+                              ],
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                ],
+              ),
+            );
+          },
         );
       },
     );
@@ -925,7 +1002,6 @@ class _AttendanceScreenState extends State<AttendanceScreen> with WidgetsBinding
         ),
         centerTitle: true,
         backgroundColor: const Color(0xFF101C22),
-
         bottom: PreferredSize(
           preferredSize: const Size.fromHeight(1),
           child: Container(color: const Color(0xFF455664), height: 1),
@@ -993,7 +1069,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> with WidgetsBinding
         // Кнопка «Как на прошлой паре»
         Expanded(
           child: GestureDetector(
-            onTap: _hasActiveLesson ? _copyFromPrevious : null,
+            onTap: (_hasActiveLesson && !_isCopying) ? _copyFromPrevious : null,
             child: Container(
               padding: EdgeInsets.symmetric(vertical: h * 0.012),
               decoration: BoxDecoration(
@@ -1004,11 +1080,18 @@ class _AttendanceScreenState extends State<AttendanceScreen> with WidgetsBinding
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  Icon(Icons.content_copy_rounded, color: _hasActiveLesson ? const Color(0xFF34D399) : const Color(0xFF455664), size: w * 0.04),
+                  if (_isCopying)
+                    SizedBox(
+                      width: w * 0.04,
+                      height: w * 0.04,
+                      child: const CircularProgressIndicator(color: Color(0xFF34D399), strokeWidth: 2),
+                    )
+                  else
+                    Icon(Icons.content_copy_rounded, color: _hasActiveLesson ? const Color(0xFF34D399) : const Color(0xFF455664), size: w * 0.04),
                   SizedBox(width: w * 0.015),
                   Flexible(
                     child: Text(
-                      'Как на прошлой',
+                      _isCopying ? 'Копирование...' : 'Как на прошлой',
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(color: _hasActiveLesson ? const Color(0xFF34D399) : const Color(0xFF455664), fontSize: w * 0.03, fontWeight: FontWeight.w600),
                     ),
@@ -1104,11 +1187,11 @@ class _AttendanceScreenState extends State<AttendanceScreen> with WidgetsBinding
                 ),
               ),
               SizedBox(width: w * 0.02),
-              _miniStat(w, Colors.green, '${lesson.presentCount}'),
+              _miniStat(w, const Color(0xFF34D399), '${lesson.presentCount}'),
               SizedBox(width: w * 0.025),
-              _miniStat(w, Colors.red, '${lesson.absentCount}'),
+              _miniStat(w, const Color(0xFFF87171), '${lesson.absentCount}'),
               SizedBox(width: w * 0.025),
-              _miniStat(w, Colors.orange, '${lesson.lateCount}'),
+              _miniStat(w, const Color(0xFFFACC15), '${lesson.lateCount}'),
               SizedBox(width: w * 0.025),
               Text(
                 '${lesson.markedCount}/${lesson.totalCount}',
@@ -1160,15 +1243,15 @@ class _AttendanceScreenState extends State<AttendanceScreen> with WidgetsBinding
     return Row(
       children: [
         Expanded(
-          child: _buildFilterChip(label: 'ПРИСУТСТВУЕТ', color: Colors.green, w: w, onTap: () => _showStudentsByStatus('present', Colors.green, 'Присутствуют')),
+          child: _buildFilterChip(label: 'ПРИСУТСТВУЕТ', color: const Color(0xFF34D399), w: w, onTap: () => _showStudentsByStatus('present', const Color(0xFF34D399), 'Присутствуют')),
         ),
         SizedBox(width: w * 0.02),
         Expanded(
-          child: _buildFilterChip(label: 'ОТСУТСТВУЕТ', color: Colors.red, w: w, onTap: () => _showStudentsByStatus('absent', Colors.red, 'Отсутствуют')),
+          child: _buildFilterChip(label: 'ОТСУТСТВУЕТ', color: const Color(0xFFF87171), w: w, onTap: () => _showStudentsByStatus('absent', const Color(0xFFF87171), 'Отсутствуют')),
         ),
         SizedBox(width: w * 0.02),
         Expanded(
-          child: _buildFilterChip(label: 'УВАЖ. ПРИЧИНА', color: Colors.orange, w: w, onTap: () => _showStudentsByStatus('late', Colors.orange, 'Уваж. причина')),
+          child: _buildFilterChip(label: 'УВАЖ. ПРИЧИНА', color: const Color(0xFFFACC15), w: w, onTap: () => _showStudentsByStatus('late', const Color(0xFFFACC15), 'Уваж. причина')),
         ),
       ],
     );
@@ -1206,7 +1289,6 @@ class _AttendanceScreenState extends State<AttendanceScreen> with WidgetsBinding
   }
 
   Widget _buildStudentList(double w, double h, List<int> sortedIndexes) {
-    // Список всегда показывается
     final students = _currentLesson?.students ?? [];
     final indexes = sortedIndexes;
 
@@ -1280,12 +1362,10 @@ class _AttendanceScreenState extends State<AttendanceScreen> with WidgetsBinding
                     SizedBox(width: w * 0.03),
                     Expanded(
                       child: _hasActiveLesson
-                          // Два ряда — обычный режим с занятием
                           ? Text(
                               '${student.lastName}\n${student.firstName}',
                               style: TextStyle(color: Colors.white, fontSize: w * 0.04, fontWeight: FontWeight.w600, height: 1.3),
                             )
-                          // Один ряд — режим без занятия / выходной
                           : Text(
                               '${student.lastName} ${student.firstName}',
                               maxLines: 1,
@@ -1293,7 +1373,6 @@ class _AttendanceScreenState extends State<AttendanceScreen> with WidgetsBinding
                               style: TextStyle(color: Colors.white, fontSize: w * 0.038, fontWeight: FontWeight.w500),
                             ),
                     ),
-                    // Кнопка только если есть активное занятие
                     if (_hasActiveLesson)
                       ElevatedButton(
                         onPressed: () => _showStatusSheet(context, idx),
@@ -1337,8 +1416,9 @@ class _AttendanceScreenState extends State<AttendanceScreen> with WidgetsBinding
         width: double.infinity,
         padding: const EdgeInsets.symmetric(vertical: 16),
         decoration: BoxDecoration(
+          color: color.withValues(alpha: 0.08),
           borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: color, width: 1.5),
+          border: Border.all(color: color.withValues(alpha: 0.5), width: 1.5),
         ),
         child: Row(
           mainAxisAlignment: MainAxisAlignment.center,

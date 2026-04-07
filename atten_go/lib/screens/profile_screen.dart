@@ -3,11 +3,11 @@ import 'dart:typed_data';
 import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:image_cropper/image_cropper.dart';
 import '../services/auth_service.dart';
 import '../services/group_service.dart';
 import '../services/attendance_service.dart';
 import '../services/db_service.dart';
-import '../services/realtime_service.dart';
 import '../utils/dark_page_route.dart';
 
 // Сжатие изображения — работает в main isolate (dart:ui требует Flutter engine)
@@ -64,43 +64,28 @@ class _ProfileScreenState extends State<ProfileScreen> {
   int _excused = 0;
   final Map<String, Map<String, dynamic>> _subjectStats = {};
   final Set<String> _expandedSubjects = {};
-
-  final List<StreamSubscription> _subs = [];
+  bool _subjectsBlockExpanded = false;
 
   @override
   void initState() {
     super.initState();
     _load();
-
-    // Авто-обновление при изменениях профиля, группы, посещаемости
-    _subs.add(
-      RealtimeService.onProfilesChanged.listen((_) {
-        if (mounted) _load();
-      }),
-    );
-    _subs.add(
-      RealtimeService.onGroupMembersChanged.listen((_) {
-        if (mounted) _load();
-      }),
-    );
-    _subs.add(
-      RealtimeService.onAttendanceRecordsChanged.listen((_) {
-        if (mounted) _load();
-      }),
-    );
   }
 
   Future<void> _load() async {
-    final profile = await AuthService.getProfile();
-    final membership = await GroupService.getMyMembership();
-    final currentGroup = await GroupService.getCurrentGroup();
+    // Все независимые запросы параллельно
+    final results = await Future.wait([AuthService.getProfile(), GroupService.getMyMembership(), GroupService.getCurrentGroup()]);
+
+    final profile = results[0] as UserProfile?;
+    final membership = results[1] as GroupMember?;
+    final currentGroup = results[2] as Group?;
 
     _totalLessons = 0;
     _attended = 0;
     _missed = 0;
     _excused = 0;
     _subjectStats.clear();
-    _expandedSubjects.clear();
+    // НЕ очищаем _expandedSubjects — сохраняем состояние свёрнутости предметов
     if (membership != null && membership.isStudent) {
       await _loadMyStats();
     }
@@ -162,14 +147,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
     } catch (_) {}
   }
 
-  @override
-  void dispose() {
-    for (final sub in _subs) {
-      sub.cancel();
-    }
-    super.dispose();
-  }
-
   void _toggleGroupMember(bool value) {
     // Optimistic update — сразу меняем UI без ожидания сервера
     if (_membership == null) {
@@ -222,24 +199,50 @@ class _ProfileScreenState extends State<ProfileScreen> {
     try {
       final picker = ImagePicker();
       final image = await picker.pickImage(source: source);
-      if (image == null) {
-        return;
-      }
+      if (image == null) return;
+
+      // Открываем кроппер с круглой маской
+      final cropped = await ImageCropper().cropImage(
+        sourcePath: image.path,
+        uiSettings: [
+          AndroidUiSettings(toolbarTitle: 'Обрезать фото', toolbarColor: const Color(0xFF101C22), toolbarWidgetColor: Colors.white, backgroundColor: const Color(0xFF101C22), activeControlsWidgetColor: const Color(0xFF0D59F2), lockAspectRatio: true, initAspectRatio: CropAspectRatioPreset.square),
+          IOSUiSettings(title: 'Обрезать фото', aspectRatioLockEnabled: true, resetAspectRatioEnabled: false),
+        ],
+      );
+
+      if (cropped == null) return;
 
       setState(() => _isLoading = true);
-      final rawBytes = await image.readAsBytes();
+      final rawBytes = await cropped.readAsBytes();
       // Сжимаем до 400px (dart:ui требует main isolate)
       final bytes = await _compressImageBytes(rawBytes);
+
+      // Сбрасываем старую аватарку из кэша Flutter перед загрузкой новой
+      final oldUrl = _profile?.avatarUrl;
+      if (oldUrl != null) {
+        try {
+          NetworkImage(oldUrl).evict();
+        } catch (_) {}
+      }
+
       final result = await AuthService.uploadAvatar(bytes);
-      if (result.success) {
-        await _load();
+      if (result.success && mounted) {
+        // Обновляем аватарку мгновенно из возвращённого URL —
+        // не делаем полный _load(), пользователь видит изменение сразу
+        AuthService.invalidateProfileCache();
+        setState(() {
+          if (_profile != null && result.url != null) {
+            _profile = UserProfile(id: _profile!.id, email: _profile!.email, firstName: _profile!.firstName, lastName: _profile!.lastName, avatarUrl: result.url, createdAt: _profile!.createdAt);
+          }
+          _isLoading = false;
+        });
       } else if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(result.error ?? 'Ошибка')));
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(result.error ?? 'Ошибка'), backgroundColor: const Color(0xFF10232C)));
         setState(() => _isLoading = false);
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Ошибка: $e')));
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Ошибка: $e'), backgroundColor: const Color(0xFF10232C)));
         setState(() => _isLoading = false);
       }
     }
@@ -286,10 +289,10 @@ class _ProfileScreenState extends State<ProfileScreen> {
         if (!mounted) {
           return;
         }
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Группа «${res.group!.name}» создана')));
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Группа «${res.group!.name}» создана'), backgroundColor: const Color(0xFF10232C)));
       } else {
         setState(() => _isLoading = false);
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(res.error ?? 'Ошибка')));
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(res.error ?? 'Ошибка'), backgroundColor: const Color(0xFF10232C)));
       }
     }
   }
@@ -559,22 +562,14 @@ class _ProfileScreenState extends State<ProfileScreen> {
   // ── Статистика: 4 карточки как в StudentProfileScreen ──
 
   Color _gradeColor(double p) {
-    if (p >= 0.9) {
-      return const Color(0xFF34D399);
-    }
-    if (p >= 0.7) {
-      return const Color(0xFFFACC15);
-    }
-    return const Color(0xFFF87171);
+    if (p >= 0.8) return const Color(0xFF34D399); // зелёный ≥ 80%
+    if (p >= 0.6) return const Color(0xFFFACC15); // жёлтый  ≥ 60%
+    return const Color(0xFFF87171); // красный  < 60%
   }
 
   String _grade(double p) {
-    if (p >= 0.9) {
-      return 'ХОРОШО';
-    }
-    if (p >= 0.7) {
-      return 'СРЕДНЕ';
-    }
+    if (p >= 0.8) return 'ХОРОШО';
+    if (p >= 0.6) return 'СРЕДНЕ';
     return 'ПЛОХО';
   }
 
@@ -604,7 +599,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
             ),
             SizedBox(width: fs * 0.03),
             Expanded(
-              child: _statCard(fs, h, label: 'Уваж. причина', value: '$_excused', badge: '$excusedPct%', badgeColor: const Color(0xFFFACC15)),
+              child: _statCard(fs, h, label: 'Уважительных', value: '$_excused', badge: '$excusedPct%', badgeColor: const Color(0xFFFACC15)),
             ),
           ],
         ),
@@ -650,30 +645,64 @@ class _ProfileScreenState extends State<ProfileScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            Text(
-              'По предметам',
-              style: TextStyle(color: Colors.white, fontSize: fs * 0.044, fontWeight: FontWeight.bold),
+        // ── Заголовок-аккордеон ────────────────────────────────────────────
+        GestureDetector(
+          onTap: () => setState(() => _subjectsBlockExpanded = !_subjectsBlockExpanded),
+          child: Container(
+            padding: EdgeInsets.symmetric(horizontal: fs * 0.04, vertical: fs * 0.03),
+            decoration: BoxDecoration(
+              color: const Color(0xFF10232C),
+              borderRadius: BorderRadius.circular(fs * 0.04),
+              border: Border.all(color: const Color(0xFF455664), width: 1),
             ),
-            GestureDetector(
-              onTap: () => setState(() {
-                if (_expandedSubjects.length == _subjectStats.length) {
-                  _expandedSubjects.clear();
-                } else {
-                  _expandedSubjects.addAll(_subjectStats.keys);
-                }
-              }),
-              child: Text(
-                _expandedSubjects.length == _subjectStats.length ? 'Свернуть все' : 'Развернуть все',
-                style: TextStyle(color: const Color(0xFF0D59F2), fontSize: fs * 0.033),
-              ),
+            child: Row(
+              children: [
+                Icon(Icons.school_outlined, color: const Color(0xFF0D59F2), size: fs * 0.05),
+                SizedBox(width: fs * 0.025),
+                Expanded(
+                  child: Text(
+                    'По предметам',
+                    style: TextStyle(color: Colors.white, fontSize: fs * 0.044, fontWeight: FontWeight.bold),
+                  ),
+                ),
+                Text(
+                  '${_subjectStats.length} шт.',
+                  style: TextStyle(color: const Color(0xFF7D92B1), fontSize: fs * 0.032),
+                ),
+                SizedBox(width: fs * 0.015),
+                AnimatedRotation(
+                  turns: _subjectsBlockExpanded ? 0.5 : 0.0,
+                  duration: const Duration(milliseconds: 200),
+                  child: Icon(Icons.keyboard_arrow_down_rounded, color: const Color(0xFF7D92B1), size: fs * 0.06),
+                ),
+              ],
             ),
-          ],
+          ),
         ),
-        SizedBox(height: h * 0.015),
-        ..._subjectStats.entries.map((e) => _subjectCard(fs, h, e.key, e.value)),
+        // ── Содержимое блока ──────────────────────────────────────────────
+        if (_subjectsBlockExpanded) ...[
+          SizedBox(height: h * 0.012),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.end,
+            children: [
+              GestureDetector(
+                onTap: () => setState(() {
+                  if (_expandedSubjects.length == _subjectStats.length) {
+                    _expandedSubjects.clear();
+                  } else {
+                    _expandedSubjects.addAll(_subjectStats.keys);
+                  }
+                }),
+                child: Text(
+                  _expandedSubjects.length == _subjectStats.length ? 'Свернуть все' : 'Развернуть все',
+                  style: TextStyle(color: const Color(0xFF0D59F2), fontSize: fs * 0.033),
+                ),
+              ),
+            ],
+          ),
+          SizedBox(height: h * 0.012),
+          ..._subjectStats.entries.map((e) => _subjectCard(fs, h, e.key, e.value)),
+        ],
       ],
     );
   }
@@ -783,7 +812,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   SizedBox(width: fs * 0.02),
                   _detailChip(fs, 'Пропуски', '${stats['absent']}', const Color(0xFFF87171)),
                   SizedBox(width: fs * 0.02),
-                  _detailChip(fs, 'Уваж. причина', '${stats['late']}', const Color(0xFFFACC15)),
+                  _detailChip(fs, 'Причина', '${stats['late']}', const Color(0xFFFACC15)),
                 ],
               ),
             ],
@@ -975,7 +1004,7 @@ class _MyGroupScreenState extends State<_MyGroupScreen> {
         Navigator.pop(context, 'deleted');
       } else {
         setState(() => _isLoading = false);
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(res.error ?? 'Ошибка')));
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(res.error ?? 'Ошибка'), backgroundColor: const Color(0xFF10232C)));
       }
     }
   }
@@ -1193,7 +1222,7 @@ class _MyGroupScreenState extends State<_MyGroupScreen> {
         await _load();
       } else {
         setState(() => _isLoading = false);
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(res.error ?? 'Ошибка')));
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(res.error ?? 'Ошибка'), backgroundColor: const Color(0xFF10232C)));
       }
     }
   }
@@ -1214,7 +1243,7 @@ class _MyGroupScreenState extends State<_MyGroupScreen> {
     final res = await GroupService.sendInvitation(email: result.email, role: result.role);
     if (mounted) {
       setState(() => _isLoading = false);
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(res.success ? 'Приглашение отправлено' : (res.error ?? 'Ошибка'))));
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(res.success ? 'Приглашение отправлено' : (res.error ?? 'Ошибка')), backgroundColor: const Color(0xFF10232C)));
     }
   }
 
@@ -1593,7 +1622,7 @@ class _ChangePasswordScreenState extends State<_ChangePasswordScreen> {
       setState(() => _isSaving = false);
       if (result.success) {
         Navigator.pop(context);
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Пароль изменён')));
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Пароль изменён'), backgroundColor: Color(0xFF10232C)));
       } else {
         setState(() => _error = result.error);
       }

@@ -96,14 +96,14 @@ class _StudentProfileScreenState extends State<StudentProfileScreen> {
   }
 
   String _grade(double p) {
-    if (p >= 0.9) return 'ХОРОШО';
-    if (p >= 0.7) return 'СРЕДНЕ';
+    if (p >= 0.8) return 'ХОРОШО';
+    if (p >= 0.6) return 'СРЕДНЕ';
     return 'ПЛОХО';
   }
 
   Color _gradeColor(double p) {
-    if (p >= 0.9) return const Color(0xFF34D399);
-    if (p >= 0.7) return const Color(0xFFFACC15);
+    if (p >= 0.8) return const Color(0xFF34D399);
+    if (p >= 0.6) return const Color(0xFFFACC15);
     return const Color(0xFFF87171);
   }
 

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../services/auth_service.dart';
+import '../utils/app_snackbar.dart';
 
 class RegisterScreen extends StatefulWidget {
   const RegisterScreen({super.key});
@@ -70,7 +71,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
           } else {
             // Регистрация успешна, но вход не удался — возвращаем на логин
             Navigator.pop(context);
-            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Аккаунт создан. Войдите с вашим email и паролем.')));
+            AppSnackBar.success(context, 'Аккаунт создан. Войдите с вашим email и паролем.');
           }
         }
       } else {

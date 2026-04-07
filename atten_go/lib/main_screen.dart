@@ -26,6 +26,9 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
   StreamSubscription? _groupMembersSub;
   StreamSubscription? _groupsSub;
 
+  // Таймер для дебаунса фонового обновления при resume
+  Timer? _resumeDebounce;
+
   late final AnimationController _animController = AnimationController(vsync: this, duration: const Duration(milliseconds: 250))..value = 1.0;
   late Animation<double> _fadeAnimation = _buildFade();
   late Animation<Offset> _slideAnimation = _buildSlide(true);
@@ -40,7 +43,7 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
 
     _loadRole();
 
-    // Слушаем изменения в group_members и groups
+    // Слушаем изменения в group_members и groups — они могут реально поменять роль
     _groupMembersSub = RealtimeService.onGroupMembersChanged.listen((_) {
       developer.log('[MainScreen] group_members changed → reload role');
       _loadRole();
@@ -54,14 +57,21 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
   // ── Загрузка роли ──────────────────────────────────────
   Future<void> _loadRole() async {
     GroupService.invalidateCache();
-    final can = await GroupService.canManage();
-    final group = await GroupService.getCurrentGroup();
+    final results = await Future.wait([
+      GroupService.canManage(),
+      GroupService.getCurrentGroup(),
+    ]);
+    final can = results[0] as bool;
+    final group = results[1] as dynamic;
     if (mounted) {
+      final hasGroup = group != null;
+      // Перестраиваем экраны только если роль реально изменилась
+      final roleChanged = can != _canManage || hasGroup != _hasGroup;
       setState(() {
         _canManage = can;
-        _hasGroup = group != null;
+        _hasGroup = hasGroup;
         _roleLoaded = true;
-        _screenKey++;
+        if (roleChanged && _roleLoaded) _screenKey++;
       });
     }
   }
@@ -76,6 +86,7 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
     WidgetsBinding.instance.removeObserver(this);
     _groupMembersSub?.cancel();
     _groupsSub?.cancel();
+    _resumeDebounce?.cancel();
     RealtimeService.dispose();
     _animController.dispose();
     super.dispose();
@@ -84,10 +95,44 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
-      // При возврате в приложение переподписываемся
+      // Переподключаем realtime — это важно
       RealtimeService.reconnect();
+
+      // Фоновое тихое обновление роли с дебаунсом 1.5с
+      // НЕ инвалидируем кэш и НЕ перестраиваем экраны если роль не изменилась
+      _resumeDebounce?.cancel();
+      _resumeDebounce = Timer(const Duration(milliseconds: 1500), () {
+        _silentRoleCheck();
+      });
+    }
+  }
+
+  /// Тихая проверка роли в фоне — не вызывает setState если ничего не изменилось.
+  /// Пользователь не видит никаких лоадеров или перестроений.
+  Future<void> _silentRoleCheck() async {
+    try {
       GroupService.invalidateCache();
-      _loadRole();
+      final results = await Future.wait([
+        GroupService.canManage(),
+        GroupService.getCurrentGroup(),
+      ]);
+      final can = results[0] as bool;
+      final group = results[1] as dynamic;
+      if (mounted) {
+        final hasGroup = group != null;
+        if (can != _canManage || hasGroup != _hasGroup) {
+          // Роль реально изменилась — обновляем
+          developer.log('[MainScreen] role changed on resume, rebuilding');
+          setState(() {
+            _canManage = can;
+            _hasGroup = hasGroup;
+            _screenKey++;
+          });
+        }
+        // Если роль та же — ничего не делаем, пользователь не замечает
+      }
+    } catch (e) {
+      developer.log('[MainScreen] silentRoleCheck error: $e');
     }
   }
 
