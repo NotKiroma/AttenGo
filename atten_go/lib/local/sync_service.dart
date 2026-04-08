@@ -75,7 +75,6 @@ class SyncService {
       developer.log('[SyncService] syncGroup uid=$uid');
       final supa = DatabaseService.client;
 
-      // Членство текущего пользователя с вложенной группой
       final ms = await supa.from('group_members').select('id, group_id, user_id, role, is_student, groups(id, name, owner_id)').eq('user_id', uid);
 
       developer.log('[SyncService] syncGroup memberships=${(ms as List).length}');
@@ -91,12 +90,10 @@ class SyncService {
 
       await _local.upsertGroup(LocalGroupsCompanion(id: Value(groupData['id'] as String), name: Value(groupData['name'] as String? ?? 'Группа'), ownerId: Value(groupData['owner_id'] as String)));
 
-      // Все участники группы
       final allMembers = await supa.from('group_members').select('id, group_id, user_id, role, is_student').eq('group_id', gid);
 
       final userIds = (allMembers as List).map((r) => r['user_id'] as String).toSet().toList();
 
-      // Один запрос для всех профилей участников
       final profileRows = await supa.from('profiles').select('id, email, first_name, last_name, avatar_url').inFilter('id', userIds);
 
       final profileMap = <String, Map<String, dynamic>>{};
@@ -104,14 +101,12 @@ class SyncService {
         profileMap[p['id'] as String] = p as Map<String, dynamic>;
       }
 
-      // Batch-вставка участников
       await _local.clearGroupMembers(gid);
       final memberCompanions = (allMembers as List).map((r) {
         return LocalGroupMembersCompanion(id: Value(r['id'] as int), groupId: Value(r['group_id'] as String), userId: Value(r['user_id'] as String), role: Value(r['role'] as String), isStudent: Value(r['is_student'] as bool? ?? false));
       }).toList();
       await _local.upsertGroupMembers(memberCompanions);
 
-      // Batch-вставка профилей участников
       final profileCompanions = profileMap.values.map((p) {
         return LocalProfilesCompanion(id: Value(p['id'] as String), email: Value(p['email'] as String? ?? ''), firstName: Value(p['first_name'] as String? ?? ''), lastName: Value(p['last_name'] as String? ?? ''), avatarUrl: Value(p['avatar_url'] as String?));
       }).toList();
@@ -125,7 +120,7 @@ class SyncService {
   }
 
   // ─────────────────────────────────────────────────────────────────────────
-  // СТУДЕНТЫ — один запрос к profiles вместо N
+  // СТУДЕНТЫ
   // ─────────────────────────────────────────────────────────────────────────
 
   static Future<void> syncStudents(String groupId) async {
@@ -145,7 +140,6 @@ class SyncService {
 
       developer.log('[SyncService] syncStudents count=${(rows as List).length}');
 
-      // Собираем все linked_user_id одним set'ом → один запрос к profiles
       final linkedIds = (rows as List).map((r) => r['linked_user_id'] as String?).whereType<String>().toSet().toList();
 
       final avatarMap = <String, String?>{};
@@ -184,7 +178,7 @@ class SyncService {
   }
 
   // ─────────────────────────────────────────────────────────────────────────
-  // РАСПИСАНИЕ — batch
+  // РАСПИСАНИЕ
   // ─────────────────────────────────────────────────────────────────────────
 
   static Future<void> syncSchedule(String groupId) async {
@@ -218,29 +212,28 @@ class SyncService {
   }
 
   // ─────────────────────────────────────────────────────────────────────────
-  // ПОСЕЩАЕМОСТЬ — два batch вместо N*M запросов
+  // ПОСЕЩАЕМОСТЬ
   // ─────────────────────────────────────────────────────────────────────────
-
-  // Внутри класса SyncService замените метод syncAttendance:
 
   static Future<void> syncAttendance(String groupId) async {
     try {
-      // Получаем данные из Supabase
+      developer.log('[SyncService] syncAttendance gid=$groupId');
       final lessons = await DatabaseService.client.from('attendance_lessons').select('*, attendance_records(*)').eq('group_id', groupId);
 
-      // Используем транзакцию Drift для атомарности
       await _local.transaction(() async {
-        // Очищаем старые записи для этой группы перед вставкой новых
-        // (Или используем insertAllOnConflictUpdate, если id совпадают)
+        // BUGFIX: сначала очищаем старые локальные данные,
+        // иначе удалённые в Supabase записи останутся в локальной БД.
+        await _local.clearAttendanceRecordsForGroup(groupId);
+        await _local.clearAttendanceLessons(groupId);
 
         final lessonCompanions = (lessons as List).map((l) => LocalAttendanceLessonsCompanion(id: Value(l['id'] as int), groupId: Value(l['group_id'] as String), date: Value(l['date'] as String), lessonKey: Value(l['lesson_key'] as String), subject: Value(l['subject'] as String))).toList();
 
         await _local.upsertAttendanceLessons(lessonCompanions);
 
-        List<LocalAttendanceRecordsCompanion> recordCompanions = [];
-        for (var l in lessons) {
+        final recordCompanions = <LocalAttendanceRecordsCompanion>[];
+        for (final l in lessons) {
           final records = l['attendance_records'] as List;
-          for (var r in records) {
+          for (final r in records) {
             recordCompanions.add(LocalAttendanceRecordsCompanion(id: Value(r['id'] as int), lessonId: Value(r['lesson_id'] as int), studentId: Value(r['student_id'] as String), status: Value(r['status'] as String?)));
           }
         }
@@ -254,7 +247,7 @@ class SyncService {
   }
 
   // ─────────────────────────────────────────────────────────────────────────
-  // ОБЪЯВЛЕНИЯ — batch + отдельный запрос к profiles (нет embedded join)
+  // ОБЪЯВЛЕНИЯ
   // ─────────────────────────────────────────────────────────────────────────
 
   static Future<void> syncAnnouncements(String groupId) async {
@@ -271,7 +264,6 @@ class SyncService {
           .eq('group_id', groupId)
           .order('created_at', ascending: false);
 
-      // Один запрос для всех авторов
       final authorIds = (list as List).map((r) => r['author_id'] as String).toSet().toList();
 
       final profileMap = <String, String>{};
@@ -310,7 +302,7 @@ class SyncService {
   }
 
   // ─────────────────────────────────────────────────────────────────────────
-  // УВЕДОМЛЕНИЯ — batch
+  // УВЕДОМЛЕНИЯ
   // ─────────────────────────────────────────────────────────────────────────
 
   static Future<void> syncNotifications(String userId) async {
@@ -343,7 +335,7 @@ class SyncService {
   }
 
   // ─────────────────────────────────────────────────────────────────────────
-  // ПРИГЛАШЕНИЯ — batch + отдельные запросы к profiles и groups
+  // ПРИГЛАШЕНИЯ
   // ─────────────────────────────────────────────────────────────────────────
 
   static Future<void> syncInvitations(String email) async {
@@ -355,7 +347,6 @@ class SyncService {
 
       final list = rows as List;
 
-      // Два параллельных запроса вместо N
       final senderIds = list.map((r) => r['sender_id'] as String).toSet().toList();
       final groupIds = list.map((r) => r['group_id'] as String).toSet().toList();
 

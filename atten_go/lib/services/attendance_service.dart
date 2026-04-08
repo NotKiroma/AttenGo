@@ -214,7 +214,9 @@ class AttendanceService {
 
       // 2. Отправка в Supabase
       if (lesson.id == null) {
-        final inserted = await client.from('attendance_lessons').insert({'group_id': gid, 'date': lesson.date, 'lesson_key': lesson.lessonKey, 'subject': lesson.subject}).select().single();
+        // BUGFIX: добавлен user_id — без него INSERT может упасть (NOT NULL constraint)
+        final uid = AuthService.currentUserId;
+        final inserted = await client.from('attendance_lessons').insert({'user_id': uid, 'group_id': gid, 'date': lesson.date, 'lesson_key': lesson.lessonKey, 'subject': lesson.subject}).select().single();
 
         final newId = inserted['id'] as int;
         await _insertStudentRecords(newId, lesson.students.map((s) => Student(id: s.studentId, lastName: s.lastName, firstName: s.firstName, isMale: s.isMale)).toList());

@@ -3711,6 +3711,34 @@ abstract class _$LocalDatabase extends GeneratedDatabase {
       $LocalNotificationsTable(this);
   late final $LocalInvitationsTable localInvitations =
       $LocalInvitationsTable(this);
+  late final Index idxGroupMembersGroup = Index('idx_group_members_group',
+      'CREATE INDEX idx_group_members_group ON local_group_members (group_id)');
+  late final Index idxGroupMembersUser = Index('idx_group_members_user',
+      'CREATE INDEX idx_group_members_user ON local_group_members (user_id)');
+  late final Index idxStudentsGroupStatus = Index('idx_students_group_status',
+      'CREATE INDEX idx_students_group_status ON local_students (group_id, status)');
+  late final Index idxStudentsLinked = Index('idx_students_linked',
+      'CREATE INDEX idx_students_linked ON local_students (linked_user_id)');
+  late final Index idxScheduleGroupDay = Index('idx_schedule_group_day',
+      'CREATE INDEX idx_schedule_group_day ON local_schedule (group_id, day_index)');
+  late final Index idxAttLessonsGroup = Index('idx_att_lessons_group',
+      'CREATE INDEX idx_att_lessons_group ON local_attendance_lessons (group_id)');
+  late final Index idxAttLessonsLookup = Index('idx_att_lessons_lookup',
+      'CREATE UNIQUE INDEX idx_att_lessons_lookup ON local_attendance_lessons (group_id, date, lesson_key)');
+  late final Index idxAttRecordsLesson = Index('idx_att_records_lesson',
+      'CREATE INDEX idx_att_records_lesson ON local_attendance_records (lesson_id)');
+  late final Index idxAttRecordsStudent = Index('idx_att_records_student',
+      'CREATE INDEX idx_att_records_student ON local_attendance_records (student_id)');
+  late final Index idxAnnouncementsGroup = Index('idx_announcements_group',
+      'CREATE INDEX idx_announcements_group ON local_announcements (group_id)');
+  late final Index idxAnnouncementsCancel = Index('idx_announcements_cancel',
+      'CREATE INDEX idx_announcements_cancel ON local_announcements (group_id, is_cancel, cancel_date)');
+  late final Index idxNotificationsUser = Index('idx_notifications_user',
+      'CREATE INDEX idx_notifications_user ON local_notifications (user_id)');
+  late final Index idxNotificationsUnread = Index('idx_notifications_unread',
+      'CREATE INDEX idx_notifications_unread ON local_notifications (user_id, is_read)');
+  late final Index idxInvitationsEmail = Index('idx_invitations_email',
+      'CREATE INDEX idx_invitations_email ON local_invitations (recipient_email, status)');
   @override
   Iterable<TableInfo<Table, Object?>> get allTables =>
       allSchemaEntities.whereType<TableInfo<Table, Object?>>();
@@ -3725,7 +3753,21 @@ abstract class _$LocalDatabase extends GeneratedDatabase {
         localAttendanceRecords,
         localAnnouncements,
         localNotifications,
-        localInvitations
+        localInvitations,
+        idxGroupMembersGroup,
+        idxGroupMembersUser,
+        idxStudentsGroupStatus,
+        idxStudentsLinked,
+        idxScheduleGroupDay,
+        idxAttLessonsGroup,
+        idxAttLessonsLookup,
+        idxAttRecordsLesson,
+        idxAttRecordsStudent,
+        idxAnnouncementsGroup,
+        idxAnnouncementsCancel,
+        idxNotificationsUser,
+        idxNotificationsUnread,
+        idxInvitationsEmail
       ];
 }
 

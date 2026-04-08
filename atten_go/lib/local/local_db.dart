@@ -185,9 +185,13 @@ class LocalDatabase extends _$LocalDatabase {
       await m.createAll();
     },
     onUpgrade: (m, from, to) async {
-      // v1 → v2: создаём все индексы
       if (from < 2) {
-        await m.createAll();
+        // Correctly filter and cast the entities to Index
+        for (final entity in allSchemaEntities) {
+          if (entity is Index) {
+            await m.createIndex(entity);
+          }
+        }
       }
     },
   );
